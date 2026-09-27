@@ -1,0 +1,22 @@
+{
+  "name": "act",
+  "version": "0.1.0",
+  "description": "Two-sided structured communication: private intake, shared problem map, options, single-text agreement.",
+  "private": true,
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node --env-file-if-exists=.env src/server.js",
+    "dev": "node --env-file-if-exists=.env --watch src/server.js",
+    "mock": "node scripts/mock.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.128.0",
+    "express": "^5.1.0",
+    "zod": "^4.6.5"
+  }
+}
