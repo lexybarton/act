@@ -17,7 +17,7 @@ for (const file of fs.readdirSync(DATA_DIR)) {
     const s = JSON.parse(fs.readFileSync(path.join(DATA_DIR, file), "utf8"));
     // Jobs cannot survive a restart; surface them as retryable errors.
     for (const job of Object.values(s.jobs || {})) {
-      if (job.status === "running") Object.assign(job, { status: "error", error: "Server restarted during processing. Please retry." });
+      if (job.status === "running") Object.assign(job, { status: "error", error: "Server se během zpracování restartoval. Zkuste to prosím znovu." });
     }
     sessions.set(s.id, s);
   } catch (e) {

@@ -26,6 +26,12 @@ export const STATES = [
   "NO_AGREEMENT",
 ];
 export const TERMINAL = ["FULL_AGREEMENT", "PARTIAL_AGREEMENT", "CLARIFIED_DISAGREEMENT", "NO_AGREEMENT"];
+const OUTCOME_LABELS = {
+  FULL_AGREEMENT: "úplná dohoda",
+  PARTIAL_AGREEMENT: "částečná dohoda",
+  CLARIFIED_DISAGREEMENT: "vyjasněná neshoda",
+  NO_AGREEMENT: "bez dohody",
+};
 export const VOTES = ["accept", "accept_with_revision", "uncertain", "reject", "not_important"];
 export const SHARING = ["verbatim", "paraphrase", "private"];
 export const MAX_ROUNDS = Number(process.env.MAX_ROUNDS || 8);
@@ -78,7 +84,7 @@ export function createSession({ title, name, mode, question, deadline }) {
     jobs: {},
     log: [],
   };
-  log(s, "A", "created the session");
+  log(s, "A", "založil(a) relaci");
   if (!quick) return save(s);
   s.quick = { framing: null, round: 0, options: null, history: [], confirm: null, agreement: null };
   s.participants.A.quick = newQuickParticipant();
@@ -88,21 +94,21 @@ export function createSession({ title, name, mode, question, deadline }) {
 
 export function join(code, name) {
   const s = store.findByJoinCode(code);
-  if (!s) fail("Unknown or already used code.", 404);
+  if (!s) fail("Neznámý nebo už použitý kód.", 404);
   s.participants.B = newParticipant(name);
   s.joinCode = null; // one-time
   if (s.mode === "quick") s.participants.B.quick = newQuickParticipant();
   else s.state = "PRIVATE_INTAKE";
-  log(s, "B", "joined");
+  log(s, "B", "se připojil(a)");
   save(s);
   return { id: s.id, token: s.participants.B.token };
 }
 
 export function auth(id, token) {
   const s = store.get(id);
-  if (!s) fail("Session not found.", 404);
+  if (!s) fail("Relace nenalezena.", 404);
   const who = ["A", "B"].find((p) => s.participants[p]?.token && s.participants[p].token === token);
-  if (!who) fail("Not a participant of this session.", 403);
+  if (!who) fail("Nejste účastníkem této relace.", 403);
   // Work on a copy: a handler that throws halfway must not leave half-applied changes in memory.
   return { s: structuredClone(s), who };
 }
@@ -112,15 +118,15 @@ function log(s, who, text) {
 }
 
 function assertActive(s) {
-  if (TERMINAL.includes(s.state)) fail("This process has ended.");
-  if (s.paused) fail("The process is paused. Resume it first.");
+  if (TERMINAL.includes(s.state)) fail("Tento proces už skončil.");
+  if (s.paused) fail("Proces je pozastavený. Nejdřív ho obnovte.");
 }
 function assertState(s, ...states) {
   assertActive(s);
-  if (!states.includes(s.state)) fail(`Not possible in state ${s.state}.`);
+  if (!states.includes(s.state)) fail(`Ve stavu ${s.state} to není možné.`);
 }
 function assertNoJob(s, key) {
-  if (s.jobs[key]?.status === "running") fail("Already processing, please wait.");
+  if (s.jobs[key]?.status === "running") fail("Už se zpracovává, chvíli počkejte.");
 }
 
 // Background LLM job: the handler returns immediately, the client polls for the result.
@@ -155,7 +161,7 @@ const names = (s) => ({ A: s.participants.A.name, B: s.participants.B.name });
 export function saveIntake(s, who, { intake, sharing }) {
   assertState(s, "CREATED", "PRIVATE_INTAKE");
   const me = s.participants[who];
-  if (me.intakeStatus === "confirmed") fail("Your intake is confirmed. Reopen it to edit.");
+  if (me.intakeStatus === "confirmed") fail("Váš vstup je potvrzený. Pro úpravy ho znovu otevřete.");
   for (const f of llm.INTAKE_FIELDS) {
     if (typeof intake?.[f] === "string") me.intake[f] = intake[f].slice(0, 8000);
     if (SHARING.includes(sharing?.[f])) me.sharing[f] = sharing[f];
@@ -166,9 +172,9 @@ export function saveIntake(s, who, { intake, sharing }) {
 export function submitIntake(s, who) {
   assertState(s, "CREATED", "PRIVATE_INTAKE");
   const me = s.participants[who];
-  if (me.intakeStatus === "confirmed") fail("Already confirmed.");
+  if (me.intakeStatus === "confirmed") fail("Už je potvrzeno.");
   for (const f of ["object", "position", "interests"]) {
-    if (!me.intake[f].trim()) fail(`Please fill in at least: object, position and interests (missing: ${f}).`, 400);
+    if (!me.intake[f].trim()) fail("Vyplňte prosím alespoň předmět, postoj a zájmy.", 400);
   }
   const key = `extract_${who}`;
   assertNoJob(s, key);
@@ -185,7 +191,7 @@ export function submitIntake(s, who) {
     p.clarifyingQuestions = out.clarifying_questions;
     p.safety = out.safety.concern ? out.safety.note : null;
     p.intakeStatus = "extracted";
-    log(cur, who, "received the structured extraction of their intake");
+    log(cur, who, "dostal(a) strukturované zpracování svého vstupu");
   });
   return s;
 }
@@ -193,8 +199,8 @@ export function submitIntake(s, who) {
 export function saveStatements(s, who, statements) {
   assertState(s, "CREATED", "PRIVATE_INTAKE");
   const me = s.participants[who];
-  if (me.intakeStatus !== "extracted") fail("Nothing to edit right now.");
-  if (!Array.isArray(statements)) fail("Invalid statements.", 400);
+  if (me.intakeStatus !== "extracted") fail("Teď není co upravovat.");
+  if (!Array.isArray(statements)) fail("Neplatná tvrzení.", 400);
   let next = Math.max(0, ...me.statements.map((st) => Number(st.id.slice(1)))) + 1;
   me.statements = statements
     .filter((st) => st && typeof st.text === "string" && st.text.trim())
@@ -211,14 +217,14 @@ export function saveStatements(s, who, statements) {
 export function confirmStatements(s, who) {
   assertState(s, "CREATED", "PRIVATE_INTAKE");
   const me = s.participants[who];
-  if (me.intakeStatus !== "extracted") fail("Nothing to confirm.");
-  if (!me.statements.length) fail("Add at least one statement.", 400);
-  if (!s.participants.B) fail("Wait until the other participant has joined.");
+  if (me.intakeStatus !== "extracted") fail("Není co potvrdit.");
+  if (!me.statements.length) fail("Přidejte alespoň jedno tvrzení.", 400);
+  if (!s.participants.B) fail("Počkejte, až se připojí druhá strana.");
   me.intakeStatus = "confirmed";
-  log(s, who, "confirmed their statements");
+  log(s, who, "potvrdil(a) svá tvrzení");
   if (s.participants[other(who)].intakeStatus === "confirmed") {
     s.state = "INTAKE_CONFIRMED";
-    log(s, null, "both intakes confirmed");
+    log(s, null, "oba vstupy potvrzeny");
     return generateMap(s, who);
   }
   return save(s);
@@ -228,7 +234,7 @@ export function reopenIntake(s, who) {
   assertState(s, "CREATED", "PRIVATE_INTAKE");
   const me = s.participants[who];
   me.intakeStatus = "draft";
-  log(s, who, "reopened their intake");
+  log(s, who, "znovu otevřel(a) svůj vstup");
   return save(s);
 }
 
@@ -239,7 +245,7 @@ export function generateMap(s, who) {
   assertNoJob(s, "map");
   const input = { title: s.title, names: names(s), a: sharedStatements(s, "A"), b: sharedStatements(s, "B") };
   const validRefs = new Set([...input.a, ...input.b].map((st) => st.id));
-  if (s.state === "SHARED_MAP_PROPOSED") log(s, who, "regenerated the problem map (all votes reset)");
+  if (s.state === "SHARED_MAP_PROPOSED") log(s, who, "nechal(a) znovu vytvořit mapu problému (všechny hlasy vynulovány)");
   runJob(s, "map", () => llm.buildMap(input), (cur, out) => {
     cur.map = {
       problemStatement: out.problem_statement,
@@ -254,21 +260,21 @@ export function generateMap(s, who) {
       done: { A: false, B: false },
     };
     cur.state = "SHARED_MAP_PROPOSED";
-    log(cur, null, "shared problem map proposed");
+    log(cur, null, "navržena společná mapa problému");
   });
   return s;
 }
 
 export function voteMap(s, who, { itemId, vote, revision }) {
   assertState(s, "SHARED_MAP_PROPOSED");
-  if (!VOTES.includes(vote)) fail("Invalid vote.", 400);
+  if (!VOTES.includes(vote)) fail("Neplatný hlas.", 400);
   const item = s.map.items.find((i) => i.id === itemId);
-  if (!item) fail("Unknown item.", 404);
-  if (item.superseded) fail("This item was replaced by a revision.");
+  if (!item) fail("Neznámá položka.", 404);
+  if (item.superseded) fail("Tato položka byla nahrazena úpravou.");
   item.votes[who] = { vote, at: now() };
   if (vote === "accept_with_revision") {
     const text = (revision || "").trim();
-    if (!text) fail("Please write your revised wording.", 400);
+    if (!text) fail("Napište prosím upravené znění.", 400);
     item.votes[who].revision = text;
     // The revision is a new candidate: the author accepts it, the other side must vote on it.
     const rev = {
@@ -282,7 +288,7 @@ export function voteMap(s, who, { itemId, vote, revision }) {
     };
     s.map.items.push(rev);
     s.map.done[other(who)] = false;
-    log(s, who, `proposed a revision of ${item.id}`);
+    log(s, who, `navrhl(a) úpravu položky ${item.id}`);
   }
   s.map.done[who] = false;
   return save(s);
@@ -290,7 +296,7 @@ export function voteMap(s, who, { itemId, vote, revision }) {
 
 export function addMapItem(s, who, { area, text }) {
   assertState(s, "SHARED_MAP_PROPOSED");
-  if (!llm.MAP_AREAS.includes(area) || !text?.trim()) fail("Area and text are required.", 400);
+  if (!llm.MAP_AREAS.includes(area) || !text?.trim()) fail("Oblast a text jsou povinné.", 400);
   s.map.items.push({
     id: `M${s.map.items.length + 1}`,
     area,
@@ -300,7 +306,7 @@ export function addMapItem(s, who, { area, text }) {
     votes: { [who]: { vote: "accept", at: now() }, [other(who)]: null },
   });
   s.map.done[other(who)] = false;
-  log(s, who, "added an item to the problem map");
+  log(s, who, "přidal(a) položku do mapy problému");
   return save(s);
 }
 
@@ -317,12 +323,12 @@ export const itemStatus = (item) => {
 export function finishMapReview(s, who) {
   assertState(s, "SHARED_MAP_PROPOSED");
   const missing = s.map.items.filter((i) => !i.votes[who] && !isSuperseded(s, i));
-  if (missing.length) fail(`Please respond to every item first (${missing.length} left).`, 400);
+  if (missing.length) fail(`Nejdřív prosím odpovězte na všechny položky (zbývá: ${missing.length}).`, 400);
   s.map.done[who] = true;
-  log(s, who, "finished reviewing the problem map");
+  log(s, who, "dokončil(a) kontrolu mapy problému");
   if (s.map.done[other(who)]) {
     s.state = "SHARED_MAP_CONFIRMED";
-    log(s, null, "problem map confirmed");
+    log(s, null, "mapa problému potvrzena");
     return generateOptions(s, who);
   }
   return save(s);
@@ -350,7 +356,7 @@ export function generateOptions(s, who) {
     a: sharedStatements(s, "A"),
     b: sharedStatements(s, "B"),
   };
-  if (s.state === "OPTIONS_GENERATED") log(s, who, "asked for a fresh set of options");
+  if (s.state === "OPTIONS_GENERATED") log(s, who, "požádal(a) o nové možnosti");
   runJob(s, "options", () => llm.generateOptions(input), (cur, out) => {
     const prev = cur.options?.items || [];
     cur.options = {
@@ -361,16 +367,16 @@ export function generateOptions(s, who) {
       })),
     };
     cur.state = "OPTIONS_GENERATED";
-    log(cur, null, "options generated");
+    log(cur, null, "možnosti vytvořeny");
   });
   return s;
 }
 
 export function reactOption(s, who, { optionId, reaction }) {
   assertState(s, "OPTIONS_GENERATED");
-  if (!["promising", "needs_work", "unacceptable"].includes(reaction)) fail("Invalid reaction.", 400);
+  if (!["promising", "needs_work", "unacceptable"].includes(reaction)) fail("Neplatná reakce.", 400);
   const o = s.options.items.find((x) => x.id === optionId);
-  if (!o) fail("Unknown option.", 404);
+  if (!o) fail("Neznámá možnost.", 404);
   o.reactions[who] = reaction;
   return save(s);
 }
@@ -379,7 +385,7 @@ export function startDraft(s, who, { optionIds }) {
   assertState(s, "OPTIONS_GENERATED");
   assertNoJob(s, "draft");
   const chosen = s.options.items.filter((o) => optionIds?.includes(o.id));
-  if (!chosen.length) fail("Choose at least one option to build the draft from.", 400);
+  if (!chosen.length) fail("Vyberte alespoň jednu možnost, ze které vznikne návrh.", 400);
   const input = {
     title: s.title,
     names: names(s),
@@ -389,7 +395,7 @@ export function startDraft(s, who, { optionIds }) {
     a: sharedStatements(s, "A"),
     b: sharedStatements(s, "B"),
   };
-  log(s, who, `started the single-text draft from ${chosen.map((o) => o.id).join(", ")}`);
+  log(s, who, `zahájil(a) společný text z možností ${chosen.map((o) => o.id).join(", ")}`);
   runJob(s, "draft", () => llm.draftZero(input), (cur, out) => {
     cur.draft = { versions: [], feedback: { A: null, B: null }, improvable: true, sourceOptionIds: optionIds };
     pushVersion(cur, out, null, null);
@@ -414,7 +420,7 @@ function pushVersion(s, out, prev, bothOk) {
   s.draft.improvable = out.improvable;
   s.draft.feedback = { A: null, B: null };
   for (const p of ["A", "B"]) s.participants[p].batnaCheck = null;
-  log(s, null, `draft version ${n} ready`);
+  log(s, null, `verze návrhu ${n} je připravená`);
 }
 
 const current = (s) => s.draft.versions.at(-1);
@@ -427,16 +433,16 @@ export function submitFeedback(s, who, { clauses, general }) {
   for (const c of v.clauses) {
     const f = clauses?.[c.id];
     if (f?.verdict === "change") {
-      if (!f.text?.trim()) fail(`Clause ${c.id}: describe what must change.`, 400);
+      if (!f.text?.trim()) fail(`Bod ${c.id}: popište, co se musí změnit.`, 400);
       fb.clauses[c.id] = { verdict: "change", text: f.text.trim().slice(0, 2000) };
     } else if (f?.verdict === "ok") {
       fb.clauses[c.id] = { verdict: "ok" };
     } else {
-      fail(`Please respond to every clause (missing ${c.id}).`, 400);
+      fail(`Odpovězte prosím na každý bod (chybí ${c.id}).`, 400);
     }
   }
   s.draft.feedback[who] = fb;
-  log(s, who, `responded to draft version ${v.n}`);
+  log(s, who, `odpověděl(a) na verzi návrhu ${v.n}`);
   const fo = s.draft.feedback[other(who)];
   if (!fo) return save(s);
 
@@ -450,7 +456,7 @@ export function submitFeedback(s, who, { clauses, general }) {
     // Stop criterion: the loop must end. Keep the agreed clauses and let the participants close.
     for (const c of v.clauses) if (bothOk.has(c.id)) c.status = "agreed";
     s.draft.improvable = false;
-    log(s, null, `round limit (${MAX_ROUNDS}) reached; please choose how to close`);
+    log(s, null, `dosažen limit kol (${MAX_ROUNDS}); zvolte prosím, jak proces uzavřít`);
     return save(s);
   }
   const feedback = { A: s.draft.feedback.A, B: s.draft.feedback.B };
@@ -498,21 +504,21 @@ function newQuickParticipant() {
 }
 
 function assertQuick(s, ...states) {
-  if (s.mode !== "quick") fail("Only available in quick mode.");
+  if (s.mode !== "quick") fail("Dostupné jen v rychlém režimu.");
   assertState(s, ...states);
 }
 
 function parseDeadline(v) {
   if (!v) return null;
   const t = Date.parse(v);
-  if (Number.isNaN(t)) fail("Invalid deadline.", 400);
+  if (Number.isNaN(t)) fail("Neplatný termín.", 400);
   return new Date(t).toISOString();
 }
 
 export function proposeFraming(s, who, { question, deadline }) {
   assertQuick(s, "QUICK_FRAMING");
   const text = (question || "").trim().slice(0, 2000);
-  if (!text) fail("Describe the one issue to settle.", 400);
+  if (!text) fail("Popište jednu věc, kterou chcete vyřešit.", 400);
   const dl = parseDeadline(deadline);
   assertNoJob(s, "frame");
   const me = s.participants[who];
@@ -526,7 +532,7 @@ export function proposeFraming(s, who, { question, deadline }) {
       acceptedBy: { A: who === "A", B: who === "B" },
     };
     cur.title = cur.quick.framing.text.slice(0, 200);
-    log(cur, who, "proposed the question to settle");
+    log(cur, who, "navrhl(a) otázku k vyřešení");
   });
   return s;
 }
@@ -534,13 +540,13 @@ export function proposeFraming(s, who, { question, deadline }) {
 export function acceptFraming(s, who) {
   assertQuick(s, "QUICK_FRAMING");
   const f = s.quick.framing;
-  if (!f) fail("No question proposed yet.");
-  if (!s.participants.B) fail("Wait until the other participant has joined.");
+  if (!f) fail("Zatím nebyla navržena žádná otázka.");
+  if (!s.participants.B) fail("Počkejte, až se připojí druhá strana.");
   f.acceptedBy[who] = true;
-  log(s, who, "accepted the question");
+  log(s, who, "přijal(a) otázku");
   if (f.acceptedBy.A && f.acceptedBy.B) {
     s.state = "QUICK_INTERVIEW";
-    log(s, null, "question agreed");
+    log(s, null, "otázka dohodnuta");
   }
   return save(s);
 }
@@ -548,7 +554,7 @@ export function acceptFraming(s, who) {
 export function saveQuickIntake(s, who, { intake }) {
   assertQuick(s, "QUICK_FRAMING", "QUICK_INTERVIEW");
   const me = s.participants[who].quick;
-  if (me.status !== "draft") fail("Your answers are already with Claude.");
+  if (me.status !== "draft") fail("Vaše odpovědi už má Claude.");
   for (const f of QUICK_FIELDS) if (typeof intake?.[f] === "string") me.intake[f] = intake[f].slice(0, 4000);
   return save(s);
 }
@@ -556,10 +562,10 @@ export function saveQuickIntake(s, who, { intake }) {
 export function startInterview(s, who) {
   assertQuick(s, "QUICK_INTERVIEW");
   const me = s.participants[who].quick;
-  if (me.status !== "draft") fail("Already started.");
-  for (const f of ["need", "proposal"]) if (!me.intake[f].trim()) fail("Please say what you need and what you propose.", 400);
+  if (me.status !== "draft") fail("Už běží.");
+  for (const f of ["need", "proposal"]) if (!me.intake[f].trim()) fail("Napište prosím, co potřebujete a co navrhujete.", 400);
   me.status = "interviewing";
-  log(s, who, "started their private interview");
+  log(s, who, "zahájil(a) svůj soukromý rozhovor");
   return runInterview(s, who);
 }
 
@@ -605,11 +611,11 @@ function runInterview(s, who) {
 export function answerQuick(s, who, { answer }) {
   assertQuick(s, "QUICK_INTERVIEW");
   const q = s.participants[who].quick;
-  if (!["interviewing", "review"].includes(q.status)) fail("Nothing to answer right now.");
+  if (!["interviewing", "review"].includes(q.status)) fail("Teď není na co odpovídat.");
   const text = (answer || "").trim().slice(0, 4000);
-  if (!text) fail("Please write an answer.", 400);
+  if (!text) fail("Napište prosím odpověď.", 400);
   // In review, an answer is a correction of the brief.
-  q.transcript.push({ phase: q.phase, role: "me", text: q.status === "review" ? `Correction to your summary: ${text}` : text, at: now() });
+  q.transcript.push({ phase: q.phase, role: "me", text: q.status === "review" ? `Oprava shrnutí: ${text}` : text, at: now() });
   q.status = "interviewing";
   q.questions = [];
   return runInterview(s, who);
@@ -620,18 +626,18 @@ export function confirmBrief(s, who) {
   const q = s.participants[who].quick;
   assertNoJob(s, `interview_${who}`);
   // "Skip the questions" is allowed once Claude has a brief to work from.
-  if (!(q.status === "review" || (q.status === "interviewing" && q.brief))) fail("Nothing to confirm yet.");
+  if (!(q.status === "review" || (q.status === "interviewing" && q.brief))) fail("Zatím není co potvrdit.");
   q.status = "ready";
   q.questions = [];
-  log(s, who, "is ready for options");
+  log(s, who, "je připraven(a) na možnosti");
   if (s.participants[other(who)].quick.status === "ready") return generateQuickOptions(s, who);
   return save(s);
 }
 
 export function generateQuickOptions(s, who) {
   assertQuick(s, "QUICK_INTERVIEW");
-  if (!["A", "B"].every((p) => s.participants[p].quick.status === "ready")) fail("Both sides must be ready first.");
-  if (s.quick.round >= QUICK_MAX_ROUNDS) fail("The round limit is reached.");
+  if (!["A", "B"].every((p) => s.participants[p].quick.status === "ready")) fail("Nejdřív musí být připravené obě strany.");
+  if (s.quick.round >= QUICK_MAX_ROUNDS) fail("Bylo dosaženo limitu kol.");
   assertNoJob(s, "qoptions");
   const input = {
     question: s.quick.framing.text,
@@ -651,7 +657,7 @@ export function generateQuickOptions(s, who) {
       exhausted: false,
     };
     cur.state = "QUICK_OPTIONS";
-    log(cur, null, `options round ${round} ready`);
+    log(cur, null, `možnosti pro kolo ${round} jsou připravené`);
   });
   return s;
 }
@@ -659,15 +665,15 @@ export function generateQuickOptions(s, who) {
 export function markQuick(s, who, { marks }) {
   assertQuick(s, "QUICK_OPTIONS");
   const o = s.quick.options;
-  if (o.exhausted) fail("The round limit is reached. Please choose how to close.");
-  if (o.marks[who]) fail("You already sent your choices for this round.");
+  if (o.exhausted) fail("Bylo dosaženo limitu kol. Zvolte prosím, jak proces uzavřít.");
+  if (o.marks[who]) fail("Pro toto kolo už jste volbu odeslali.");
   const clean = {};
   for (const item of o.items) {
-    if (!MARKS.includes(marks?.[item.id])) fail("Please mark every option.", 400);
+    if (!MARKS.includes(marks?.[item.id])) fail("Označte prosím každou možnost.", 400);
     clean[item.id] = marks[item.id];
   }
   o.marks[who] = clean;
-  log(s, who, `sent their sealed choices for round ${o.round}`);
+  log(s, who, `odeslal(a) zapečetěnou volbu pro kolo ${o.round}`);
   if (!o.marks[other(who)]) return save(s);
 
   // Both sealed choices are in: pick the option both can live with that they like most together.
@@ -678,10 +684,10 @@ export function markQuick(s, who, { marks }) {
   if (best) {
     s.state = "QUICK_CONFIRM";
     s.quick.confirm = { optionId: best.id, A: null, B: null };
-    log(s, null, `both can accept "${best.title}"; waiting for final confirmation`);
+    log(s, null, `oba mohou přijmout „${best.title}“; čeká se na finální potvrzení`);
     return save(s);
   }
-  log(s, null, `no option in round ${o.round} works for both`);
+  log(s, null, `v kole ${o.round} žádná možnost nevyhovuje oběma`);
   return nextRound(s);
 }
 
@@ -691,7 +697,7 @@ function nextRound(s) {
     s.state = "QUICK_OPTIONS";
     s.quick.options.exhausted = true;
     s.quick.confirm = null;
-    log(s, null, `round limit (${QUICK_MAX_ROUNDS}) reached; please choose how to close`);
+    log(s, null, `dosažen limit kol (${QUICK_MAX_ROUNDS}); zvolte prosím, jak proces uzavřít`);
     return save(s);
   }
   s.state = "QUICK_INTERVIEW";
@@ -709,18 +715,18 @@ function nextRound(s) {
 export function confirmQuick(s, who, { accept, note }) {
   assertQuick(s, "QUICK_CONFIRM");
   const c = s.quick.confirm;
-  if (c[who] !== null) fail("You already answered.");
+  if (c[who] !== null) fail("Už jste odpověděli.");
   c[who] = !!accept;
   if (!accept) {
     const q = s.participants[who].quick;
     const why = (note || "").trim().slice(0, 2000);
     // The reason is private: it only goes into the decliner's own gap interview.
-    q.transcript.push({ phase: s.quick.round, role: "me", text: `I declined "${s.quick.options.items.find((i) => i.id === c.optionId).title}" at the final confirmation${why ? `: ${why}` : "."}`, at: now() });
+    q.transcript.push({ phase: s.quick.round, role: "me", text: `Při finálním potvrzení odmítám „${s.quick.options.items.find((i) => i.id === c.optionId).title}“${why ? `: ${why}` : "."}`, at: now() });
     s.quick.history.at(-1).declinedBy = who;
-    log(s, who, "declined the matched option at the final confirmation");
+    log(s, who, "odmítl(a) shodnou možnost při finálním potvrzení");
     return nextRound(s);
   }
-  log(s, who, "confirmed the agreement");
+  log(s, who, "potvrdil(a) dohodu");
   if (c.A && c.B) {
     s.quick.agreement = s.quick.options.items.find((i) => i.id === c.optionId);
     return finish(s, "FULL_AGREEMENT", who);
@@ -730,7 +736,7 @@ export function confirmQuick(s, who, { accept, note }) {
 
 export function setNotify(s, who, { topic }) {
   const t = (topic || "").trim();
-  if (t && !notify.validTopic(t)) fail("Topic: 8-64 letters, digits, - or _.", 400);
+  if (t && !notify.validTopic(t)) fail("Téma: 8–64 znaků, jen písmena bez diakritiky, číslice, - nebo _.", 400);
   s.participants[who].notify = t || null;
   return save(s);
 }
@@ -762,46 +768,46 @@ export function yourTurn(s, who) {
 export function pause(s, who, reason) {
   assertActive(s);
   s.paused = { by: who, at: now(), reason: (reason || "").slice(0, 500) };
-  log(s, who, "paused the process");
+  log(s, who, "pozastavil(a) proces");
   return save(s);
 }
 
 export function resume(s, who) {
-  if (!s.paused) fail("Not paused.");
+  if (!s.paused) fail("Proces není pozastavený.");
   s.paused = null;
-  log(s, who, "resumed the process");
+  log(s, who, "obnovil(a) proces");
   return save(s);
 }
 
 // No agreement can be declared unilaterally at any time (each side may always walk away).
 // Partial agreement and clarified disagreement are joint statements and need the other side's consent.
 export function proposeOutcome(s, who, { type, note }) {
-  if (TERMINAL.includes(s.state)) fail("This process has ended.");
+  if (TERMINAL.includes(s.state)) fail("Tento proces už skončil.");
   if (type === "NO_AGREEMENT") return finish(s, "NO_AGREEMENT", who, note);
   assertActive(s);
-  if (!["PARTIAL_AGREEMENT", "CLARIFIED_DISAGREEMENT"].includes(type)) fail("Invalid outcome.", 400);
+  if (!["PARTIAL_AGREEMENT", "CLARIFIED_DISAGREEMENT"].includes(type)) fail("Neplatný výsledek.", 400);
   if (type === "PARTIAL_AGREEMENT" && !(s.draft && current(s).clauses.some((c) => c.status === "agreed"))) {
-    fail("A partial agreement needs at least one clause both have agreed to.", 400);
+    fail("Částečná dohoda vyžaduje alespoň jeden bod, na kterém jste se oba dohodli.", 400);
   }
   if (type === "CLARIFIED_DISAGREEMENT" && !s.map && !(s.quick?.round > 0)) {
-    fail("Clarified disagreement requires a shared problem map (or a round of options) first.", 400);
+    fail("Vyjasněná neshoda vyžaduje nejdřív společnou mapu problému (nebo jedno kolo možností).", 400);
   }
   s.outcome = { proposal: { type, by: who, at: now(), note: (note || "").slice(0, 2000) } };
-  log(s, who, `proposed to close as ${type}`);
+  log(s, who, `navrhl(a) uzavření: ${OUTCOME_LABELS[type]}`);
   return save(s);
 }
 
 export function respondOutcome(s, who, { accept }) {
   const prop = s.outcome?.proposal;
-  if (!prop) fail("No pending proposal.");
+  if (!prop) fail("Žádný návrh nečeká na odpověď.");
   if (prop.by === who) {
     s.outcome.proposal = null;
-    log(s, who, "withdrew their closing proposal");
+    log(s, who, "stáhl(a) svůj návrh na uzavření");
     return save(s);
   }
   if (!accept) {
     s.outcome.proposal = null;
-    log(s, who, `declined to close as ${prop.type}`);
+    log(s, who, `odmítl(a) uzavření: ${OUTCOME_LABELS[prop.type]}`);
     return save(s);
   }
   return finish(s, prop.type, who, prop.note);
@@ -811,7 +817,7 @@ function finish(s, type, who, note) {
   s.state = type;
   s.paused = null;
   s.outcome = { ...(s.outcome || {}), proposal: null, final: { type, at: now(), by: who, note: note || "" } };
-  log(s, who, `closed the process: ${type}`);
+  log(s, who, `uzavřel(a) proces: ${OUTCOME_LABELS[type]}`);
   return save(s);
 }
 

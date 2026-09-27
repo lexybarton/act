@@ -47,7 +47,7 @@ Hard rules:
 - Use neutral, concrete, non-inflammatory language. Describe behaviour and needs, not character.
 - Never invent facts, interests, or commitments that the participants did not express. When something is unclear, say so.
 - Agreement is not the goal in itself. Clarified disagreement or no agreement are legitimate outcomes.
-- Write in the language the participants used.`;
+- Write in Czech, the language of the app, unless both participants clearly write in another language; then use theirs.`;
 
 const PRIVACY_RULES = `Privacy: each input statement is labelled VERBATIM (may be quoted) or PARAPHRASE (may inform your output, but must never be quoted or closely reproduced; refer to it only in generalized form). Material the participants kept private has been removed and must not be guessed at.`;
 
@@ -63,12 +63,12 @@ async function call({ system, prompt, schema, effort = "high" }) {
     messages: [{ role: "user", content: prompt }],
   });
   if (response.stop_reason === "refusal") {
-    throw new Error("The AI declined to process this content. Please rephrase and try again.");
+    throw new Error("AI odmítla tento obsah zpracovat. Zkuste ho přeformulovat a pošlete znovu.");
   }
   if (response.stop_reason === "max_tokens") {
-    throw new Error("The AI response was cut off. Please try again, or shorten the input.");
+    throw new Error("Odpověď AI byla useknutá. Zkuste to znovu, nebo zkraťte vstup.");
   }
-  if (!response.parsed_output) throw new Error("The AI returned an unreadable response. Please retry.");
+  if (!response.parsed_output) throw new Error("AI vrátila nečitelnou odpověď. Zkuste to prosím znovu.");
   return response.parsed_output;
 }
 

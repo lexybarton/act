@@ -17,12 +17,12 @@ const wrap = (fn) => (req, res) => {
     if (out !== undefined) res.json(out);
   } catch (err) {
     if (!(err instanceof flow.HttpError)) console.error(err);
-    res.status(err.status || 500).json({ error: err.status ? err.message : "Internal error" });
+    res.status(err.status || 500).json({ error: err.status ? err.message : "Interní chyba serveru" });
   }
 };
 const text = (v, max, label) => {
   const t = typeof v === "string" ? v.trim() : "";
-  if (!t) throw new flow.HttpError(400, `${label} is required.`);
+  if (!t) throw new flow.HttpError(400, `Pole „${label}“ je povinné.`);
   return t.slice(0, max);
 };
 
@@ -38,13 +38,13 @@ app.get("/api/config", (req, res) =>
 app.post(
   "/api/sessions",
   wrap((req) => {
-    if (!req.body.consent) throw new flow.HttpError(400, "Please accept the ground rules.");
-    const name = text(req.body.name, 60, "Name");
-    if (QUICK_ONLY && req.body.mode !== "quick") throw new flow.HttpError(400, "Only quick sessions are available on this server.");
+    if (!req.body.consent) throw new flow.HttpError(400, "Přijměte prosím základní pravidla.");
+    const name = text(req.body.name, 60, "Jméno");
+    if (QUICK_ONLY && req.body.mode !== "quick") throw new flow.HttpError(400, "Na tomto serveru je dostupný jen rychlý režim.");
     const s =
       req.body.mode === "quick"
-        ? flow.createSession({ mode: "quick", name, question: text(req.body.question, 2000, "The issue"), deadline: req.body.deadline })
-        : flow.createSession({ title: text(req.body.title, 200, "Topic"), name });
+        ? flow.createSession({ mode: "quick", name, question: text(req.body.question, 2000, "Věc k vyřešení"), deadline: req.body.deadline })
+        : flow.createSession({ title: text(req.body.title, 200, "Téma"), name });
     return { id: s.id, token: s.participants.A.token };
   }),
 );
@@ -52,9 +52,9 @@ app.post(
 app.post(
   "/api/join",
   wrap((req) => {
-    if (!req.body.consent) throw new flow.HttpError(400, "Please accept the ground rules.");
-    const code = text(req.body.code, 20, "Code").toUpperCase().replace(/[^A-Z0-9]/g, "");
-    return flow.join(code, text(req.body.name, 60, "Name"));
+    if (!req.body.consent) throw new flow.HttpError(400, "Přijměte prosím základní pravidla.");
+    const code = text(req.body.code, 20, "Kód").toUpperCase().replace(/[^A-Z0-9]/g, "");
+    return flow.join(code, text(req.body.name, 60, "Jméno"));
   }),
 );
 

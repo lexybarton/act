@@ -2,6 +2,8 @@
 
 A two-sided structured communication tool. Two people each describe a decision, situation or disagreement **privately**; an AI (Claude) helps them build one shared picture of the problem, explore options, and iteratively improve **one neutral text** until they reach full agreement, partial agreement, clarified disagreement, or no agreement.
 
+The user interface is in Czech, and Claude answers in Czech unless both people write in another language.
+
 It is not an AI judge and not an AI therapist. The AI proposes, and nothing counts as shared or agreed until both people explicitly accept it.
 
 There are two modes:

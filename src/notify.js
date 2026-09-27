@@ -20,7 +20,7 @@ export function update(s, turnOf) {
     fetch(`${BASE}/${part.notify}`, {
       method: "POST",
       headers: { Title: "Act", Tags: "handshake", ...(PUBLIC_URL ? { Click: `${PUBLIC_URL}/#/s/${s.id}` } : {}) },
-      body: "It's your turn in Act.",
+      body: "Jste na řadě v Act.",
     }).catch((err) => console.error(`[notify] ${err.message}`));
   }
 }
