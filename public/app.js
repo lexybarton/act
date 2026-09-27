@@ -63,6 +63,19 @@ const OUTCOMES = {
   CLARIFIED_DISAGREEMENT: ["Clarified disagreement", "Both understand the underlying conflict but choose differently."],
   NO_AGREEMENT: ["No agreement", "At least one participant prefers their alternative to any agreement on offer."],
 };
+const QUICK_STEPS = [
+  ["Agree the question", ["QUICK_FRAMING"]],
+  ["Private interview", ["QUICK_INTERVIEW"]],
+  ["Sealed choice", ["QUICK_OPTIONS", "QUICK_CONFIRM"]],
+  ["Outcome", ["FULL_AGREEMENT", "PARTIAL_AGREEMENT", "CLARIFIED_DISAGREEMENT", "NO_AGREEMENT"]],
+];
+const QUICK_FIELDS = [
+  ["need", "What do you need from this?", "The one or two things that matter most to you here. *"],
+  ["proposal", "What do you propose?", "A concrete answer: who, what, when, where, how much. *"],
+  ["limits", "What can't you accept?", "Hard limits, and briefly why."],
+  ["fallback", "Your fallback (private)", "What you'll do if you can't settle it. Never shown to anyone and never used in options; it only helps Claude understand how much room you have."],
+];
+const MARKS = { prefer: ["Prefer", "ok"], ok: ["Could live with it", "warn"], no: ["No", "bad"] };
 const STEPS = [
   ["Private intake", ["CREATED", "PRIVATE_INTAKE"]],
   ["Problem map", ["INTAKE_CONFIRMED", "SHARED_MAP_PROPOSED"]],
@@ -117,7 +130,10 @@ let session = null; // current view from the server
 let sessionId = null;
 let token = null;
 let pollTimer = null;
+let fastTimer = null;
 let busy = false;
+let quickMode = true; // home page: which kind of session to create
+let homeArgs = [null, ""];
 // Values of inputs the user is editing, keyed by data-k, so polling re-renders never lose typing.
 const vals = {};
 const val = (k, fallback = "") => (k in vals ? vals[k] : fallback);
@@ -130,6 +146,7 @@ route();
 
 function route() {
   clearInterval(pollTimer);
+  clearTimeout(fastTimer);
   session = null;
   const parts = location.hash.replace(/^#\/?/, "").split("/");
   if (parts[0] === "s" && parts[1]) {
@@ -155,9 +172,12 @@ async function refresh() {
   try {
     const v = await api("GET", `/api/s/${sessionId}`, null, token);
     if (!session || v.version !== session.version) {
+      const wasTurn = session?.yourTurn;
       session = v;
       render();
+      if (v.yourTurn && wasTurn === false) signalTurn();
     }
+    pollSoonIfBusy();
   } catch (e) {
     if (e.status === 403 || e.status === 404) {
       clearInterval(pollTimer);
@@ -167,11 +187,30 @@ async function refresh() {
   }
 }
 
+// While Claude is working, check back sooner than the regular poll.
+function pollSoonIfBusy() {
+  clearTimeout(fastTimer);
+  if (session && Object.values(session.jobs).some((j) => j.status === "running")) fastTimer = setTimeout(refresh, 800);
+}
+
+// The other person may take minutes or hours: tell the user when it is their move.
+function signalTurn() {
+  if (document.hidden && "Notification" in window && Notification.permission === "granted") {
+    try {
+      new Notification("Act: your turn", { body: session.title, tag: `act-${sessionId}` });
+    } catch { /* some browsers only allow notifications from a service worker */ }
+  }
+}
+function updateTitle() {
+  document.title = session?.yourTurn ? `● Your turn · Act` : "Act — structured two-sided dialogue";
+}
+
 async function act(method, sub, body) {
   busy = true;
   try {
     session = await api(method, `/api/s/${sessionId}${sub}`, body, token);
     render();
+    pollSoonIfBusy();
     return true;
   } catch (e) {
     toast(e.message, true);
@@ -184,6 +223,8 @@ async function act(method, sub, body) {
 // ---------- home ----------
 
 function renderHome(message, joinCode = "") {
+  homeArgs = [message, joinCode];
+  updateTitle();
   $app.innerHTML = `
     <h1>Act</h1>
     <p class="muted">A structured, two-sided way to work through a decision or disagreement. Not a judge. Not a therapist.
@@ -204,8 +245,22 @@ function renderHome(message, joinCode = "") {
     <div class="grid2">
       <div class="card">
         <h3>Start a new session</h3>
-        <label>Topic<span class="hint">A short neutral title, e.g. "Where we spend the holidays"</span></label>
-        <input type="text" data-k="new.title" value="${h(val("new.title"))}" maxlength="200">
+        <div class="row">
+          <button class="chip ${quickMode ? "on" : ""}" data-action="mode" data-mode="quick">Quick: settle one issue</button>
+          <button class="chip ${quickMode ? "" : "on"}" data-action="mode" data-mode="full">Full process</button>
+        </div>
+        ${
+          quickMode
+            ? `<p class="small muted">For one specific thing that has to be settled soon (minutes to hours), when talking directly isn't working.
+              Claude asks each of you privately what it needs to know, proposes concrete answers, and you each choose in private.</p>
+              <label>The one issue to settle<span class="hint">e.g. "Who picks up the kids this Friday and when". Claude will rephrase it neutrally; the other person sees only that version.</span></label>
+              <textarea data-k="new.question" rows="2" maxlength="2000">${h(val("new.question"))}</textarea>
+              <label>Needs to be settled by <span class="hint">Optional</span></label>
+              <input type="datetime-local" data-k="new.deadline" value="${h(val("new.deadline"))}">`
+            : `<p class="small muted">For a whole decision or disagreement: shared problem map, options, and a single negotiated text.</p>
+              <label>Topic<span class="hint">A short neutral title, e.g. "Where we spend the holidays"</span></label>
+              <input type="text" data-k="new.title" value="${h(val("new.title"))}" maxlength="200">`
+        }
         <label>Your first name</label>
         <input type="text" data-k="new.name" value="${h(val("new.name"))}" maxlength="60">
         <p><button class="primary" data-action="create">Create session</button></p>
@@ -248,6 +303,8 @@ function render() {
 
   const other = s.them?.name || "the other participant";
   const terminal = !!OUTCOMES[s.state];
+  const quick = s.mode === "quick";
+  updateTitle();
   $app.innerHTML = `
     <div class="row between">
       <a href="#/" class="small">← Act</a>
@@ -259,10 +316,12 @@ function render() {
     ${privateLink ? `<div class="banner info small"><b>Your private link.</b> Save it somewhere safe: it opens your side of this session on any device. Don't share it.<br>
       <input type="text" readonly value="${h(privateLink)}" onclick="this.select()"> <button class="link" data-action="hideLink">Done, hide this</button></div>` : ""}
     ${renderInvite(s)}
+    ${quick && !terminal ? renderTurn(s, other) : ""}
     ${renderOutcomeProposal(s)}
-    ${terminal ? renderFinal(s) : ""}
-    ${renderStage(s, other)}
+    ${terminal ? (quick ? renderQuickFinal(s) : renderFinal(s)) : ""}
+    ${quick ? renderQuickStage(s, other) : renderStage(s, other)}
     ${renderControls(s, terminal)}
+    ${terminal ? "" : renderNotify(s)}
     <details class="card soft"><summary>Activity log</summary><ul class="tight small">${s.log
       .map((l) => `<li><span class="muted">${new Date(l.at).toLocaleString()}</span> — ${l.who ? h(s.names[l.who]) + " " : ""}${h(l.text)}</li>`)
       .join("")}</ul></details>`;
@@ -277,8 +336,9 @@ function render() {
 }
 
 function renderStepper(s) {
-  const idx = STEPS.findIndex(([, states]) => states.includes(s.state));
-  return `<div class="stepper">${STEPS.map(
+  const steps = s.mode === "quick" ? QUICK_STEPS : STEPS;
+  const idx = steps.findIndex(([, states]) => states.includes(s.state));
+  return `<div class="stepper">${steps.map(
     ([label], i) => `<span class="${i < idx ? "done" : i === idx ? "now" : ""}">${i + 1}. ${label}</span>`,
   ).join("")}</div>`;
 }
@@ -598,6 +658,249 @@ function renderBatna(s) {
   </div>`;
 }
 
+// ---------- quick mode ----------
+
+function renderTurn(s, other) {
+  if (s.paused || !s.them) return "";
+  return s.yourTurn
+    ? `<div class="banner ok"><b>● Your turn.</b></div>`
+    : `<div class="banner info small">Nothing for you to do right now. This page updates by itself; you can leave it open or turn on notifications below.</div>`;
+}
+
+const topicSuggestion = `act-${Array.from(crypto.getRandomValues(new Uint8Array(9)), (b) => (b % 36).toString(36)).join("")}`;
+function renderNotify(s) {
+  const perm = "Notification" in window ? Notification.permission : "unsupported";
+  return `<details class="card soft no-print"><summary>Get told when it's your turn</summary>
+    <p class="small muted">The other person may answer in minutes or hours. Two options, neither sends any content of this session:</p>
+    <p class="small"><b>This browser:</b> ${
+      perm === "granted"
+        ? "on (while this tab stays open)."
+        : perm === "unsupported"
+          ? "not supported here."
+          : `<button data-action="browserNotify">Turn on browser notifications</button>`
+    }</p>
+    <p class="small"><b>Phone, via <a href="https://ntfy.sh" target="_blank" rel="noopener">ntfy</a>:</b> install the ntfy app, subscribe to a hard-to-guess topic name, and enter the same name here.
+    The server then pings that topic with "It's your turn in Act." (Anyone who knows the topic name can read that ping, so make it long and random.)</p>
+    <div class="row"><input type="text" data-k="notify.topic" value="${h(val("notify.topic", s.me.notify || ""))}" placeholder="e.g. ${h(topicSuggestion)}" style="max-width:320px">
+    <button data-action="saveNotify">${s.me.notify ? "Update" : "Save"}</button></div>
+  </details>`;
+}
+
+function renderQuickStage(s, other) {
+  switch (s.state) {
+    case "QUICK_FRAMING":
+      return renderFraming(s, other);
+    case "QUICK_INTERVIEW":
+      return `${questionCard(s)}${renderInterview(s, other)}`;
+    case "QUICK_OPTIONS":
+      return `${questionCard(s)}${renderSealed(s, other)}`;
+    case "QUICK_CONFIRM":
+      return `${questionCard(s)}${renderQuickConfirm(s, other)}`;
+    default:
+      return renderQuickHistory(s);
+  }
+}
+
+const toLocalInput = (iso) => {
+  if (!iso) return "";
+  const d = new Date(iso);
+  return new Date(d.getTime() - d.getTimezoneOffset() * 60000).toISOString().slice(0, 16);
+};
+const fmtDeadline = (d) => (d ? new Date(d).toLocaleString([], { dateStyle: "medium", timeStyle: "short" }) : "");
+
+function questionCard(s) {
+  const f = s.quick.framing;
+  const dl = f.deadline;
+  const late = dl && Date.parse(dl) < Date.now();
+  return `<div class="card soft"><b>The question you agreed to settle</b><p style="font-size:1.1em">${h(f.text)}</p>
+    ${dl ? `<p class="small ${late ? "" : "muted"}">${late ? "⚠ Deadline passed: " : "Settle by "}${h(fmtDeadline(dl))}</p>` : ""}</div>`;
+}
+
+function renderFraming(s, other) {
+  const f = s.quick.framing;
+  const j = s.jobs.frame;
+  const mine = s.me.quick;
+  const proposing = val("frame.mode") === "propose";
+  let body;
+  if (j?.status === "running") body = spinner("Claude is rephrasing the question neutrally…");
+  else if (!f) body = jobState("frame", "", null) || spinner("Starting…");
+  else {
+    const accepted = f.acceptedBy[s.you];
+    const theyAccepted = f.acceptedBy[s.you === "A" ? "B" : "A"];
+    body = `<div class="card">
+      <p class="small muted">Proposed by ${f.by === s.you ? "you" : h(s.names[f.by])}, neutrally rephrased by Claude${f.by === s.you ? ` from your wording (“${h(mine.frameRaw)}”, which only you can see)` : ""}:</p>
+      <p style="font-size:1.15em"><b>${h(f.text)}</b></p>
+      ${f.deadline ? `<p class="small">Settle by ${h(fmtDeadline(f.deadline))}</p>` : ""}
+      ${f.note && f.by === s.you ? `<div class="banner info small">${h(f.note)}</div>` : ""}
+      ${jobState("frame", "", null)}
+      ${
+        accepted
+          ? `<div class="banner ok small">You accepted this question. ${s.them ? (theyAccepted ? "" : `Waiting for ${h(other)} to accept it or suggest other wording.`) : ""}</div>`
+          : `<p class="small muted">Only this one question will be worked on. Anything else stays out of it and can be a separate session.</p>
+            <div class="row"><button class="primary" data-action="acceptFrame">Accept this question</button>
+            <button data-action="frameMode">Suggest different wording</button></div>`
+      }
+      ${
+        proposing
+          ? `<label>Your wording</label><textarea data-k="frame.text" rows="2">${h(val("frame.text", f.text))}</textarea>
+            <label>Settle by <span class="hint">Optional</span></label><input type="datetime-local" data-k="frame.deadline" value="${h(val("frame.deadline", toLocalInput(f.deadline)))}">
+            <p class="row"><button class="primary" data-action="proposeFrame">Propose</button><button data-action="frameCancel">Cancel</button></p>`
+          : accepted
+            ? `<p><button class="link" data-action="frameMode">Suggest different wording</button></p>`
+            : ""
+      }
+    </div>`;
+  }
+  return `<h2>1. Agree the question</h2>${body}
+    ${mine.status === "draft" ? `<h2>Meanwhile: prepare your answers</h2>${quickIntakeForm(s, false)}` : ""}`;
+}
+
+function quickIntakeForm(s, canStart) {
+  const q = s.me.quick;
+  return `<div class="card">
+    <p class="small muted">Only you and Claude see this. Claude uses it, in paraphrased form, to propose answers; the other person never sees your words.
+    Stick to the agreed question: anything else is set aside.</p>
+    ${QUICK_FIELDS.map(
+      ([k, label, hint]) => `<label>${label}<span class="hint">${hint}</span></label>
+      <textarea data-k="qi.${k}" data-save="quick" rows="2">${h(val(`qi.${k}`, q.intake[k]))}</textarea>`,
+    ).join("")}
+    ${canStart ? `<p class="row"><button class="primary" data-action="startInterview">Send to Claude</button><span class="small muted">Drafts save automatically.</span></p>` : `<p class="small muted">Drafts save automatically. You can send them once you both accept the question.</p>`}
+  </div>`;
+}
+
+function renderInterview(s, other) {
+  const q = s.me.quick;
+  const running = s.jobs.interview?.status === "running";
+  const theirStatus = { draft: "hasn't started yet", interviewing: "is answering Claude's questions", review: "is checking Claude's summary", ready: "is ready" }[s.them?.quickStatus] || "";
+  const gap = q.phase > 0;
+  let body;
+  if (q.status === "draft") body = quickIntakeForm(s, true);
+  else if (running) body = spinner(gap ? "Claude is working out what might bridge the gap…" : "Claude is reading your answers…");
+  else if (q.status === "interviewing") {
+    body = `${jobState("interview", "", null)}
+      ${q.questions.length ? `<div class="card">
+        <p class="small muted">Claude needs a bit more to find something that could work. Short answers are fine. Only Claude sees them.</p>
+        <ol>${q.questions.map((x) => `<li>${h(x)}</li>`).join("")}</ol>
+        <textarea data-k="qa.${q.transcript.length}" rows="3" placeholder="Your answers">${h(val(`qa.${q.transcript.length}`))}</textarea>
+        <p class="row"><button class="primary" data-action="answerQuick">Send answers</button>
+        ${q.brief ? `<button data-action="quickReady" title="Claude works with what it has">Skip, use what I've said</button>` : ""}</p>
+      </div>` : ""}`;
+  } else if (q.status === "review") {
+    const b = q.brief;
+    body = `<div class="card">
+      <p class="small muted">This is how Claude understood your side. It's never shown to ${h(other)}; it informs the options in paraphrased form. Is it right?</p>
+      <ul class="tight">
+        <li><b>You propose:</b> ${h(b.position)}</li>
+        <li><b>You need:</b> ${h(b.needs)}</li>
+        ${b.limits ? `<li><b>Your limits:</b> ${h(b.limits)}</li>` : ""}
+        ${b.flexibility ? `<li><b>Where you have room:</b> ${h(b.flexibility)}</li>` : ""}
+        ${b.facts.map((f) => `<li>${h(f)}</li>`).join("")}
+      </ul>
+      <p class="row"><button class="primary" data-action="quickReady">Yes, that's right</button></p>
+      <label>Or correct something</label>
+      <textarea data-k="qa.fix" rows="2">${h(val("qa.fix"))}</textarea>
+      <p><button data-action="correctBrief">Send correction</button></p>
+    </div>`;
+  } else {
+    body = `<div class="banner ok">You're ready. ${s.them?.quickStatus === "ready" ? "" : `Waiting for ${h(other)}.`}</div>
+      ${jobState("qoptions", "Claude is writing concrete options for you both…", "genQuickOptions")}`;
+  }
+  return `<h2>2. Private interview${gap ? ` · follow-up ${q.phase}` : ""}</h2>
+    ${gap ? `<div class="banner warn small">No option worked for both of you yet. Claude has a few follow-up questions to find something that could.</div>` : ""}
+    <p class="muted small">${h(other)} ${h(theirStatus)}.</p>
+    ${q.safety ? `<div class="banner bad"><b>Please read:</b> ${h(q.safety)}</div>` : ""}
+    ${q.note ? `<div class="banner info small">${h(q.note)}</div>` : ""}
+    ${body}
+    ${q.transcript.length ? `<details class="card soft small"><summary>Your conversation with Claude</summary>${q.transcript
+      .map((t) => (t.role === "ai" ? `<p><b>Claude:</b> ${t.questions.map(h).join(" ")}</p>` : `<p><b>You:</b> ${h(t.text)}</p>`))
+      .join("")}</details>` : ""}`;
+}
+
+function optionCard(o, s, extra = "") {
+  return `<div class="card">
+    <h3 style="margin-top:0">${h(o.title)}</h3>
+    <ul class="tight">${o.terms.map((t) => `<li>${h(t)}</li>`).join("")}</ul>
+    <p class="small muted">${h(o.rationale)}</p>
+    <div class="grid2 small"><div><b>For ${h(s.names.A)}:</b> ${h(o.serves_a)}</div><div><b>For ${h(s.names.B)}:</b> ${h(o.serves_b)}</div></div>
+    ${extra}
+  </div>`;
+}
+
+function renderSealed(s, other) {
+  const o = s.quick.options;
+  const mine = o.yourMarks;
+  return `<h2>3. Sealed choice · round ${o.round} of ${s.quick.maxRounds}</h2>
+    ${o.exhausted ? `<div class="banner warn">No option worked for both of you in ${s.quick.maxRounds} rounds. Close below as a clarified disagreement (you both understand where you differ) or no agreement.</div>` : ""}
+    <p class="small muted">Mark every option in private. ${h(other)} sees your marks only after sending theirs, and vice versa.
+    If there's an option neither of you said “No” to, the one you both like most goes to a final confirmation.</p>
+    ${o.items
+      .map((it) => {
+        const k = `mark.${o.round}.${it.id}`;
+        const my = mine ? mine[it.id] : val(k);
+        const theirs = o.theirMarks?.[it.id];
+        return optionCard(
+          it,
+          s,
+          `<div class="row small">${
+            mine
+              ? `You: ${badge(MARKS[my][0], MARKS[my][1])}`
+              : Object.entries(MARKS).map(([m, [l]]) => `<button class="chip ${my === m ? "on" : ""}" data-action="mark" data-k2="${k}" data-mark="${m}">${l}</button>`).join("")
+          }${theirs ? ` · ${h(other)}: ${badge(MARKS[theirs][0], MARKS[theirs][1])}` : ""}</div>`,
+        );
+      })
+      .join("")}
+    ${
+      mine || o.exhausted
+        ? `<div class="banner info small">${mine ? `Your choices are sealed. ${o.theyMarked ? "" : `Waiting for ${h(other)}.`}` : ""}</div>`
+        : `<p class="row"><button class="primary" data-action="sendMarks">Send my choices (sealed)</button>${o.theyMarked ? `<span class="small muted">${h(other)} has already sent theirs.</span>` : ""}</p>`
+    }
+    ${renderQuickHistory(s, true)}`;
+}
+
+function renderQuickConfirm(s, other) {
+  const c = s.quick.confirm;
+  const opt = s.quick.options.items.find((i) => i.id === c.optionId);
+  const theirs = s.quick.options.theirMarks;
+  return `<h2>3. Final confirmation</h2>
+    <div class="banner ok">You both said you could accept this. Confirm it as your agreement?</div>
+    ${optionCard(opt, s, `<p class="small">You marked it ${badge(MARKS[s.quick.options.yourMarks[opt.id]][0])} · ${h(other)} marked it ${badge(MARKS[theirs[opt.id]][0])}</p>`)}
+    ${
+      c.you === null
+        ? `<p class="row"><button class="primary" data-action="confirmQuick">Confirm: this is our agreement</button></p>
+          <details class="card soft"><summary>Not after all</summary>
+            <label>What's wrong with it? <span class="hint">Only Claude sees this; it uses it for follow-up questions.</span></label>
+            <textarea data-k="decline.note" rows="2">${h(val("decline.note"))}</textarea>
+            <p><button class="danger" data-action="declineQuick">Decline and keep looking</button></p>
+          </details>`
+        : `<div class="banner info small">You confirmed. ${c.them ? "" : `Waiting for ${h(other)}.`}</div>`
+    }`;
+}
+
+function renderQuickHistory(s, collapsed = false) {
+  const hist = s.quick.history.filter((r) => r.round !== s.quick.options?.round || OUTCOMES[s.state]);
+  if (!hist.length) return "";
+  const inner = hist
+    .map(
+      (r) => `<h3>Round ${r.round}${r.declined ? " (declined at confirmation)" : r.match ? "" : " (no overlap)"}</h3><ul class="tight small">${r.options
+        .map((o) => `<li>${h(o.title)}: ${s.names.A} ${badge(MARKS[r.marks.A[o.id]][0], MARKS[r.marks.A[o.id]][1])} ${s.names.B} ${badge(MARKS[r.marks.B[o.id]][0], MARKS[r.marks.B[o.id]][1])}</li>`)
+        .join("")}</ul>`,
+    )
+    .join("");
+  return collapsed ? `<details class="card soft"><summary>Earlier rounds</summary>${inner}</details>` : `<div class="card soft">${inner}</div>`;
+}
+
+function renderQuickFinal(s) {
+  const [label, desc] = OUTCOMES[s.state];
+  const f = s.outcome.final;
+  const kind = { FULL_AGREEMENT: "ok", CLARIFIED_DISAGREEMENT: "info", NO_AGREEMENT: "warn" }[s.state] || "info";
+  const a = s.quick.agreement;
+  return `<div class="banner ${kind}"><h2 style="margin:0">Outcome: ${label}</h2><p>${desc}</p>
+    <p class="small">Closed ${new Date(f.at).toLocaleString()}${f.note ? ` · “${h(f.note)}”` : ""}</p></div>
+    ${s.quick.framing ? `<div class="card"><b>Question</b><p>${h(s.quick.framing.text)}</p></div>` : ""}
+    ${a && s.state === "FULL_AGREEMENT" ? `<div class="card"><h3>Agreed: ${h(a.title)}</h3><ol>${a.terms.map((t) => `<li>${h(t)}</li>`).join("")}</ol>
+      <p class="small muted">Confirmed by ${h(s.names.A)} and ${h(s.names.B)}.</p></div>` : ""}`;
+}
+
 // ---------- outcomes ----------
 
 function renderOutcomeProposal(s) {
@@ -621,8 +924,8 @@ function renderControls(s, terminal) {
     <label>Optional note</label><textarea data-k="closeNote" placeholder="e.g. what you understand now, or why you are stopping">${h(val("closeNote"))}</textarea>
     <div class="row" style="margin-top:8px">
       ${s.paused ? "" : `<button data-action="pause">Pause</button>`}
-      <button data-action="proposeOutcome" data-type="PARTIAL_AGREEMENT" ${canPartial && s.them ? "" : "disabled title='Needs at least one clause both have agreed to'"}>Propose partial agreement</button>
-      <button data-action="proposeOutcome" data-type="CLARIFIED_DISAGREEMENT" ${s.map ? "" : "disabled title='Needs a shared problem map first'"}>Propose clarified disagreement</button>
+      ${s.mode === "quick" ? "" : `<button data-action="proposeOutcome" data-type="PARTIAL_AGREEMENT" ${canPartial && s.them ? "" : "disabled title='Needs at least one clause both have agreed to'"}>Propose partial agreement</button>`}
+      <button data-action="proposeOutcome" data-type="CLARIFIED_DISAGREEMENT" ${s.map || s.quick?.round ? "" : `disabled title='${s.mode === "quick" ? "Needs at least one round of options" : "Needs a shared problem map first"}'`}>Propose clarified disagreement</button>
       <button class="danger" data-action="noAgreement">End: no agreement</button>
       <button class="danger" data-action="delete">Delete session data</button>
     </div></details>`;
@@ -659,7 +962,24 @@ $app.addEventListener("input", (e) => {
     clearTimeout(saveTimer);
     saveTimer = setTimeout(saveIntake, 1200);
   }
+  if (el.dataset.save === "quick") {
+    clearTimeout(saveTimer);
+    saveTimer = setTimeout(saveQuickIntake, 1200);
+  }
 });
+
+const collectQuickIntake = () => ({
+  intake: Object.fromEntries(QUICK_FIELDS.map(([k]) => [k, val(`qi.${k}`, session.me.quick.intake[k])])),
+});
+async function saveQuickIntake() {
+  clearTimeout(saveTimer);
+  if (session?.me.quick?.status !== "draft") return;
+  try {
+    session = await api("PUT", `/api/s/${sessionId}/quick/intake`, collectQuickIntake(), token);
+  } catch (e) {
+    toast(e.message, true);
+  }
+}
 $app.addEventListener("change", (e) => {
   // selects and checkboxes fire change, not always input
   const el = e.target;
@@ -701,12 +1021,77 @@ $app.addEventListener("click", async (e) => {
   const d = btn.dataset;
   const s = session;
   switch (a) {
+    case "mode":
+      quickMode = d.mode === "quick";
+      renderHome(...homeArgs);
+      return;
+    case "browserNotify":
+      await Notification.requestPermission();
+      render();
+      return;
+    case "saveNotify":
+      if (await act("PUT", "/notify", { topic: val("notify.topic", s.me.notify || "") })) toast("Saved.");
+      return;
+    case "acceptFrame":
+      await act("POST", "/quick/frame/accept");
+      return;
+    case "frameMode":
+      vals["frame.mode"] = "propose";
+      render();
+      return;
+    case "frameCancel":
+      clearVals("frame.");
+      render();
+      return;
+    case "proposeFrame": {
+      const dl = val("frame.deadline", toLocalInput(s.quick.framing?.deadline));
+      if (await act("POST", "/quick/frame", { question: val("frame.text", s.quick.framing?.text), deadline: dl ? new Date(dl).toISOString() : null })) clearVals("frame.");
+      return;
+    }
+    case "startInterview":
+      await saveQuickIntake();
+      if (await act("POST", "/quick/start")) clearVals("qi.");
+      return;
+    case "answerQuick": {
+      const k = `qa.${s.me.quick.transcript.length}`;
+      if (await act("POST", "/quick/answer", { answer: val(k) })) clearVals(k);
+      return;
+    }
+    case "correctBrief":
+      if (await act("POST", "/quick/answer", { answer: val("qa.fix") })) clearVals("qa.fix");
+      return;
+    case "quickReady":
+      await act("POST", "/quick/ready");
+      return;
+    case "genQuickOptions":
+      await act("POST", "/quick/options");
+      return;
+    case "mark":
+      vals[d.k2] = d.mark;
+      render();
+      return;
+    case "sendMarks": {
+      const o = s.quick.options;
+      const marks = Object.fromEntries(o.items.map((i) => [i.id, val(`mark.${o.round}.${i.id}`, null)]));
+      if (Object.values(marks).some((m) => !m)) return toast("Please mark every option.", true);
+      if (await act("POST", "/quick/mark", { marks })) clearVals("mark.");
+      return;
+    }
+    case "confirmQuick":
+      await act("POST", "/quick/confirm", { accept: true });
+      return;
+    case "declineQuick":
+      if (await act("POST", "/quick/confirm", { accept: false, note: val("decline.note") })) clearVals("decline.");
+      return;
     case "create":
     case "join": {
+      const deadline = val("new.deadline") ? new Date(val("new.deadline")).toISOString() : null;
       const body =
-        a === "create"
-          ? { title: val("new.title"), name: val("new.name"), consent: !!val("consent") }
-          : { code: val("join.code"), name: val("join.name"), consent: !!val("consent") };
+        a === "join"
+          ? { code: val("join.code"), name: val("join.name"), consent: !!val("consent") }
+          : quickMode
+            ? { mode: "quick", question: val("new.question"), deadline, name: val("new.name"), consent: !!val("consent") }
+            : { title: val("new.title"), name: val("new.name"), consent: !!val("consent") };
       try {
         const r = await api("POST", a === "create" ? "/api/sessions" : "/api/join", body);
         storage.set(tokenKey(r.id), r.token);

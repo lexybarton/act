@@ -188,3 +188,100 @@ test("no agreement is unilateral; deletion; auth", async () => {
   await ok("DELETE", `/api/s/${id}`, null, A);
   assert.equal((await call("GET", `/api/s/${id}`, null, B)).status, 404);
 });
+
+test("quick mode: framing, private interview, sealed choices, gap round, agreement", async () => {
+  const a = await ok("POST", "/api/sessions", { mode: "quick", question: "Who picks up the kids on Friday", name: "Alex", consent: true });
+  let v = await waitFor(a.id, a.token, (x) => x.quick.framing);
+  assert.equal(v.state, "QUICK_FRAMING");
+  assert.equal(v.quick.framing.text, "Who picks up the kids on Friday?");
+  const b = await ok("POST", "/api/join", { code: v.joinCode, name: "Blake", consent: true });
+  const { id } = a;
+  const [A, B] = [a.token, b.token];
+  // The other side sees only the neutralised question, never the raw wording.
+  assert.equal((await ok("GET", `/api/s/${id}`, null, B)).me.quick.frameRaw, null);
+  assert.equal((await ok("GET", `/api/s/${id}`, null, B)).yourTurn, true);
+  v = await ok("POST", `/api/s/${id}/quick/frame/accept`, null, B);
+  assert.equal(v.state, "QUICK_INTERVIEW");
+
+  const secret = "If this fails I will call my lawyer";
+  await ok("PUT", `/api/s/${id}/quick/intake`, { intake: { need: "Be at work until 5.", proposal: "Blake picks up.", limits: "Not before 6.", fallback: secret } }, A);
+  await ok("PUT", `/api/s/${id}/quick/intake`, { intake: { need: "Gym at 4.", proposal: "Alex picks up.", limits: "", fallback: "" } }, B);
+  for (const t of [A, B]) {
+    await ok("POST", `/api/s/${id}/quick/start`, null, t);
+    // Claude asks a follow-up question first (mock: one question).
+    v = await waitFor(id, t, (x) => x.me.quick.questions.length);
+    assert.equal(v.yourTurn, true);
+    await ok("POST", `/api/s/${id}/quick/answer`, { answer: "5:30 works." }, t);
+    v = await waitFor(id, t, (x) => x.me.quick.status === "review");
+    assert.ok(!JSON.stringify(v.me.quick.brief).includes("lawyer"), "fallback leaked into brief");
+  }
+  assert.ok(!JSON.stringify(await ok("GET", `/api/s/${id}`, null, B)).includes(secret), "A's private text visible to B");
+  await ok("POST", `/api/s/${id}/quick/ready`, null, A);
+  await ok("POST", `/api/s/${id}/quick/ready`, null, B);
+  v = await waitFor(id, A, (x) => x.state === "QUICK_OPTIONS");
+  const [o1, o2, o3] = v.quick.options.items.map((i) => i.id);
+
+  // Round 1: no overlap -> sealed marks stay hidden, then a gap interview starts for both.
+  await ok("POST", `/api/s/${id}/quick/mark`, { marks: { [o1]: "prefer", [o2]: "no", [o3]: "no" } }, A);
+  v = await ok("GET", `/api/s/${id}`, null, B);
+  assert.equal(v.quick.options.theyMarked, true);
+  assert.equal(v.quick.options.theirMarks, null);
+  v = await ok("POST", `/api/s/${id}/quick/mark`, { marks: { [o1]: "no", [o2]: "prefer", [o3]: "no" } }, B);
+  v = await waitFor(id, A, (x) => x.state === "QUICK_INTERVIEW" && x.me.quick.questions.length);
+  assert.equal(v.me.quick.phase, 1);
+  for (const t of [A, B]) {
+    await ok("POST", `/api/s/${id}/quick/answer`, { answer: "6pm could work." }, t);
+    await waitFor(id, t, (x) => x.me.quick.status === "review");
+    await ok("POST", `/api/s/${id}/quick/ready`, null, t);
+  }
+  v = await waitFor(id, A, (x) => x.state === "QUICK_OPTIONS" && x.quick.round === 2);
+
+  // Round 2: both accept the middle option -> confirm -> full agreement.
+  const ids = v.quick.options.items.map((i) => i.id);
+  await ok("POST", `/api/s/${id}/quick/mark`, { marks: { [ids[0]]: "ok", [ids[1]]: "no", [ids[2]]: "prefer" } }, A);
+  v = await ok("POST", `/api/s/${id}/quick/mark`, { marks: { [ids[0]]: "no", [ids[1]]: "ok", [ids[2]]: "ok" } }, B);
+  assert.equal(v.state, "QUICK_CONFIRM");
+  assert.equal(v.quick.confirm.optionId, ids[2]);
+  assert.equal(v.quick.options.theirMarks[ids[2]], "prefer");
+  await ok("POST", `/api/s/${id}/quick/confirm`, { accept: true }, A);
+  v = await ok("POST", `/api/s/${id}/quick/confirm`, { accept: true }, B);
+  assert.equal(v.state, "FULL_AGREEMENT");
+  assert.equal(v.quick.agreement.id, ids[2]);
+});
+
+test("quick mode: round limit, then clarified disagreement by consent", async () => {
+  const a = await ok("POST", "/api/sessions", { mode: "quick", question: "Who keeps the car this weekend?", name: "Alex", consent: true });
+  let v = await waitFor(a.id, a.token, (x) => x.quick.framing);
+  const b = await ok("POST", "/api/join", { code: v.joinCode, name: "Blake", consent: true });
+  const { id } = a;
+  // B rewords the question; A must accept the new wording.
+  await ok("POST", `/api/s/${id}/quick/frame`, { question: "How is the car shared this weekend" }, b.token);
+  v = await waitFor(id, a.token, (x) => x.quick.framing.by === "B");
+  assert.equal(v.quick.framing.acceptedBy.A, false);
+  await ok("POST", `/api/s/${id}/quick/frame/accept`, null, a.token);
+  for (const t of [a.token, b.token]) {
+    await ok("PUT", `/api/s/${id}/quick/intake`, { intake: { need: "x", proposal: "y" } }, t);
+    await ok("POST", `/api/s/${id}/quick/start`, null, t);
+    await waitFor(id, t, (x) => x.me.quick.questions.length);
+    await ok("POST", `/api/s/${id}/quick/ready`, null, t); // skip the questions
+  }
+  for (let round = 1; round <= 3; round++) {
+    v = await waitFor(id, a.token, (x) => x.state === "QUICK_OPTIONS" && x.quick.round === round);
+    const [x, y] = v.quick.options.items.map((i) => i.id);
+    const others = Object.fromEntries(v.quick.options.items.slice(2).map((i) => [i.id, "no"]));
+    await ok("POST", `/api/s/${id}/quick/mark`, { marks: { ...others, [x]: "prefer", [y]: "no" } }, a.token);
+    await ok("POST", `/api/s/${id}/quick/mark`, { marks: { ...others, [x]: "no", [y]: "prefer" } }, b.token);
+    if (round < 3) {
+      for (const t of [a.token, b.token]) {
+        await waitFor(id, t, (z) => z.me.quick.status === "interviewing" && z.me.quick.questions.length);
+        await ok("POST", `/api/s/${id}/quick/ready`, null, t);
+      }
+    }
+  }
+  v = await ok("GET", `/api/s/${id}`, null, a.token);
+  assert.equal(v.state, "QUICK_OPTIONS");
+  assert.equal(v.quick.options.exhausted, true);
+  await ok("POST", `/api/s/${id}/outcome/propose`, { type: "CLARIFIED_DISAGREEMENT" }, a.token);
+  v = await ok("POST", `/api/s/${id}/outcome/respond`, { accept: true }, b.token);
+  assert.equal(v.state, "CLARIFIED_DISAGREEMENT");
+});

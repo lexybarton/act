@@ -1,8 +1,18 @@
 // Session model, state machine, background jobs and the per-participant (privacy-filtered) view.
 import * as store from "./store.js";
 import * as llm from "./llm.js";
+import * as notify from "./notify.js";
 
+// Every write goes through here so that "your turn" pings fire on any state change.
+function save(s) {
+  store.save(s);
+  notify.update(s, yourTurn);
+  return s;
+}
+
+export const QUICK_STATES = ["QUICK_FRAMING", "QUICK_INTERVIEW", "QUICK_OPTIONS", "QUICK_CONFIRM"];
 export const STATES = [
+  ...QUICK_STATES,
   "CREATED",
   "PRIVATE_INTAKE",
   "INTAKE_CONFIRMED",
@@ -45,16 +55,20 @@ function newParticipant(name) {
     clarifyingQuestions: [],
     safety: null,
     batnaCheck: null,
+    notify: null, // ntfy topic for "your turn" pings
+    quick: null,
   };
 }
 
-export function createSession({ title, name }) {
+export function createSession({ title, name, mode, question, deadline }) {
+  const quick = mode === "quick";
   const s = {
     id: store.newId(),
     joinCode: store.newJoinCode(),
-    title,
+    mode: quick ? "quick" : "full",
+    title: quick ? "Quick resolution" : title,
     createdAt: now(),
-    state: "CREATED",
+    state: quick ? "QUICK_FRAMING" : "CREATED",
     paused: null, // { by, at, reason }
     participants: { A: newParticipant(name), B: null },
     map: null, // { problemStatement, items: [], done: {A,B} }
@@ -65,7 +79,11 @@ export function createSession({ title, name }) {
     log: [],
   };
   log(s, "A", "created the session");
-  return store.save(s);
+  if (!quick) return save(s);
+  s.quick = { framing: null, round: 0, options: null, history: [], confirm: null, agreement: null };
+  s.participants.A.quick = newQuickParticipant();
+  save(s);
+  return proposeFraming(s, "A", { question, deadline });
 }
 
 export function join(code, name) {
@@ -73,9 +91,10 @@ export function join(code, name) {
   if (!s) fail("Unknown or already used code.", 404);
   s.participants.B = newParticipant(name);
   s.joinCode = null; // one-time
-  s.state = "PRIVATE_INTAKE";
+  if (s.mode === "quick") s.participants.B.quick = newQuickParticipant();
+  else s.state = "PRIVATE_INTAKE";
   log(s, "B", "joined");
-  store.save(s);
+  save(s);
   return { id: s.id, token: s.participants.B.token };
 }
 
@@ -107,21 +126,21 @@ function assertNoJob(s, key) {
 // Background LLM job: the handler returns immediately, the client polls for the result.
 function runJob(s, key, work, apply) {
   s.jobs[key] = { status: "running", startedAt: now() };
-  store.save(s);
+  save(s);
   work()
     .then((result) => {
       const cur = store.get(s.id);
       if (!cur) return; // deleted meanwhile
       apply(cur, result);
       cur.jobs[key] = { status: "done", at: now() };
-      store.save(cur);
+      save(cur);
     })
     .catch((err) => {
       console.error(`[job ${key}]`, err);
       const cur = store.get(s.id);
       if (!cur) return;
       cur.jobs[key] = { status: "error", error: err.message || String(err), at: now() };
-      store.save(cur);
+      save(cur);
     });
 }
 
@@ -141,7 +160,7 @@ export function saveIntake(s, who, { intake, sharing }) {
     if (typeof intake?.[f] === "string") me.intake[f] = intake[f].slice(0, 8000);
     if (SHARING.includes(sharing?.[f])) me.sharing[f] = sharing[f];
   }
-  return store.save(s);
+  return save(s);
 }
 
 export function submitIntake(s, who) {
@@ -186,7 +205,7 @@ export function saveStatements(s, who, statements) {
       source: llm.INTAKE_FIELDS.includes(st.source) ? st.source : "observations",
       sharing: SHARING.includes(st.sharing) ? st.sharing : "paraphrase",
     }));
-  return store.save(s);
+  return save(s);
 }
 
 export function confirmStatements(s, who) {
@@ -202,7 +221,7 @@ export function confirmStatements(s, who) {
     log(s, null, "both intakes confirmed");
     return generateMap(s, who);
   }
-  return store.save(s);
+  return save(s);
 }
 
 export function reopenIntake(s, who) {
@@ -210,7 +229,7 @@ export function reopenIntake(s, who) {
   const me = s.participants[who];
   me.intakeStatus = "draft";
   log(s, who, "reopened their intake");
-  return store.save(s);
+  return save(s);
 }
 
 // ---------- Shared map ----------
@@ -266,7 +285,7 @@ export function voteMap(s, who, { itemId, vote, revision }) {
     log(s, who, `proposed a revision of ${item.id}`);
   }
   s.map.done[who] = false;
-  return store.save(s);
+  return save(s);
 }
 
 export function addMapItem(s, who, { area, text }) {
@@ -282,7 +301,7 @@ export function addMapItem(s, who, { area, text }) {
   });
   s.map.done[other(who)] = false;
   log(s, who, "added an item to the problem map");
-  return store.save(s);
+  return save(s);
 }
 
 export const itemStatus = (item) => {
@@ -306,7 +325,7 @@ export function finishMapReview(s, who) {
     log(s, null, "problem map confirmed");
     return generateOptions(s, who);
   }
-  return store.save(s);
+  return save(s);
 }
 
 // An item whose revision both accepted is superseded by that revision.
@@ -353,7 +372,7 @@ export function reactOption(s, who, { optionId, reaction }) {
   const o = s.options.items.find((x) => x.id === optionId);
   if (!o) fail("Unknown option.", 404);
   o.reactions[who] = reaction;
-  return store.save(s);
+  return save(s);
 }
 
 export function startDraft(s, who, { optionIds }) {
@@ -419,7 +438,7 @@ export function submitFeedback(s, who, { clauses, general }) {
   s.draft.feedback[who] = fb;
   log(s, who, `responded to draft version ${v.n}`);
   const fo = s.draft.feedback[other(who)];
-  if (!fo) return store.save(s);
+  if (!fo) return save(s);
 
   const bothOk = new Set(v.clauses.filter((c) => fb.clauses[c.id].verdict === "ok" && fo.clauses[c.id].verdict === "ok").map((c) => c.id));
   if (bothOk.size === v.clauses.length && !fb.general && !fo.general) {
@@ -432,7 +451,7 @@ export function submitFeedback(s, who, { clauses, general }) {
     for (const c of v.clauses) if (bothOk.has(c.id)) c.status = "agreed";
     s.draft.improvable = false;
     log(s, null, `round limit (${MAX_ROUNDS}) reached; please choose how to close`);
-    return store.save(s);
+    return save(s);
   }
   const feedback = { A: s.draft.feedback.A, B: s.draft.feedback.B };
   const input = { title: s.title, names: names(s), problemStatement: s.map.problemStatement, version: v, feedback };
@@ -454,20 +473,304 @@ export function checkBatna(s, who) {
   return s;
 }
 
+// ---------- Quick mode ----------
+// One agreed question. Claude interviews each side privately, asking for whatever it still needs,
+// then proposes concrete options that both mark privately (prefer / ok / no). If no option works for
+// both, Claude goes back to each side with gap-focused questions and tries again, up to QUICK_MAX_ROUNDS.
+
+export const QUICK_MAX_ROUNDS = Number(process.env.QUICK_MAX_ROUNDS || 3);
+const QUICK_MAX_TURNS = 3; // AI question turns per interview phase before it must produce options
+const QUICK_FIELDS = ["need", "proposal", "limits", "fallback"];
+const MARKS = ["prefer", "ok", "no"];
+
+function newQuickParticipant() {
+  return {
+    intake: Object.fromEntries(QUICK_FIELDS.map((f) => [f, ""])),
+    status: "draft", // draft -> interviewing -> review -> ready
+    phase: 0, // 0 = first interview, n = gap interview after round n
+    transcript: [], // { phase, role: "ai", questions } | { phase, role: "me", text }
+    questions: [],
+    brief: null,
+    note: "",
+    safety: null,
+    frameRaw: null, // own un-neutralised wording of the question; never shown to the other side
+  };
+}
+
+function assertQuick(s, ...states) {
+  if (s.mode !== "quick") fail("Only available in quick mode.");
+  assertState(s, ...states);
+}
+
+function parseDeadline(v) {
+  if (!v) return null;
+  const t = Date.parse(v);
+  if (Number.isNaN(t)) fail("Invalid deadline.", 400);
+  return new Date(t).toISOString();
+}
+
+export function proposeFraming(s, who, { question, deadline }) {
+  assertQuick(s, "QUICK_FRAMING");
+  const text = (question || "").trim().slice(0, 2000);
+  if (!text) fail("Describe the one issue to settle.", 400);
+  const dl = parseDeadline(deadline);
+  assertNoJob(s, "frame");
+  const me = s.participants[who];
+  me.quick.frameRaw = text;
+  runJob(s, "frame", () => llm.quickFrame({ question: text, name: me.name }), (cur, out) => {
+    cur.quick.framing = {
+      text: out.question.trim().slice(0, 500),
+      note: out.note,
+      deadline: dl,
+      by: who,
+      acceptedBy: { A: who === "A", B: who === "B" },
+    };
+    cur.title = cur.quick.framing.text.slice(0, 200);
+    log(cur, who, "proposed the question to settle");
+  });
+  return s;
+}
+
+export function acceptFraming(s, who) {
+  assertQuick(s, "QUICK_FRAMING");
+  const f = s.quick.framing;
+  if (!f) fail("No question proposed yet.");
+  if (!s.participants.B) fail("Wait until the other participant has joined.");
+  f.acceptedBy[who] = true;
+  log(s, who, "accepted the question");
+  if (f.acceptedBy.A && f.acceptedBy.B) {
+    s.state = "QUICK_INTERVIEW";
+    log(s, null, "question agreed");
+  }
+  return save(s);
+}
+
+export function saveQuickIntake(s, who, { intake }) {
+  assertQuick(s, "QUICK_FRAMING", "QUICK_INTERVIEW");
+  const me = s.participants[who].quick;
+  if (me.status !== "draft") fail("Your answers are already with Claude.");
+  for (const f of QUICK_FIELDS) if (typeof intake?.[f] === "string") me.intake[f] = intake[f].slice(0, 4000);
+  return save(s);
+}
+
+export function startInterview(s, who) {
+  assertQuick(s, "QUICK_INTERVIEW");
+  const me = s.participants[who].quick;
+  if (me.status !== "draft") fail("Already started.");
+  for (const f of ["need", "proposal"]) if (!me.intake[f].trim()) fail("Please say what you need and what you propose.", 400);
+  me.status = "interviewing";
+  log(s, who, "started their private interview");
+  return runInterview(s, who);
+}
+
+function runInterview(s, who) {
+  const key = `interview_${who}`;
+  assertNoJob(s, key);
+  const me = s.participants[who];
+  const them = s.participants[other(who)];
+  const q = me.quick;
+  const transcript = q.transcript.filter((t) => t.phase === q.phase);
+  const last = s.quick.history.at(-1);
+  const input = {
+    question: s.quick.framing.text,
+    deadline: s.quick.framing.deadline,
+    name: me.name,
+    otherName: them.name,
+    intake: { ...q.intake },
+    transcript,
+    gap: q.phase && last
+      ? { options: last.options, ownMarks: last.marks[who], declined: !!last.declinedBy, declinedByMe: last.declinedBy === who }
+      : null,
+    // In gap rounds the other side's brief (paraphrase-level) is used only to test bridging arrangements.
+    otherBrief: q.phase && them.quick.brief ? them.quick.brief : null,
+    forceReady: transcript.filter((t) => t.role === "ai").length >= QUICK_MAX_TURNS,
+  };
+  runJob(s, key, () => llm.quickInterview(input), (cur, out) => {
+    const p = cur.participants[who].quick;
+    p.brief = out.brief;
+    p.note = out.note;
+    p.safety = out.safety.concern ? out.safety.note : null;
+    const questions = out.questions.map((x) => x.trim()).filter(Boolean).slice(0, 3);
+    if (out.ready || input.forceReady || !questions.length) {
+      p.status = "review";
+      p.questions = [];
+    } else {
+      p.questions = questions;
+      p.transcript.push({ phase: p.phase, role: "ai", questions, at: now() });
+    }
+  });
+  return s;
+}
+
+export function answerQuick(s, who, { answer }) {
+  assertQuick(s, "QUICK_INTERVIEW");
+  const q = s.participants[who].quick;
+  if (!["interviewing", "review"].includes(q.status)) fail("Nothing to answer right now.");
+  const text = (answer || "").trim().slice(0, 4000);
+  if (!text) fail("Please write an answer.", 400);
+  // In review, an answer is a correction of the brief.
+  q.transcript.push({ phase: q.phase, role: "me", text: q.status === "review" ? `Correction to your summary: ${text}` : text, at: now() });
+  q.status = "interviewing";
+  q.questions = [];
+  return runInterview(s, who);
+}
+
+export function confirmBrief(s, who) {
+  assertQuick(s, "QUICK_INTERVIEW");
+  const q = s.participants[who].quick;
+  assertNoJob(s, `interview_${who}`);
+  // "Skip the questions" is allowed once Claude has a brief to work from.
+  if (!(q.status === "review" || (q.status === "interviewing" && q.brief))) fail("Nothing to confirm yet.");
+  q.status = "ready";
+  q.questions = [];
+  log(s, who, "is ready for options");
+  if (s.participants[other(who)].quick.status === "ready") return generateQuickOptions(s, who);
+  return save(s);
+}
+
+export function generateQuickOptions(s, who) {
+  assertQuick(s, "QUICK_INTERVIEW");
+  if (!["A", "B"].every((p) => s.participants[p].quick.status === "ready")) fail("Both sides must be ready first.");
+  if (s.quick.round >= QUICK_MAX_ROUNDS) fail("The round limit is reached.");
+  assertNoJob(s, "qoptions");
+  const input = {
+    question: s.quick.framing.text,
+    deadline: s.quick.framing.deadline,
+    names: names(s),
+    briefA: s.participants.A.quick.brief,
+    briefB: s.participants.B.quick.brief,
+    history: s.quick.history,
+  };
+  runJob(s, "qoptions", () => llm.quickOptions(input), (cur, out) => {
+    const round = cur.quick.round + 1;
+    cur.quick.round = round;
+    cur.quick.options = {
+      round,
+      items: out.options.slice(0, 4).map((o, i) => ({ id: `R${round}.${i + 1}`, ...o })),
+      marks: { A: null, B: null },
+      exhausted: false,
+    };
+    cur.state = "QUICK_OPTIONS";
+    log(cur, null, `options round ${round} ready`);
+  });
+  return s;
+}
+
+export function markQuick(s, who, { marks }) {
+  assertQuick(s, "QUICK_OPTIONS");
+  const o = s.quick.options;
+  if (o.exhausted) fail("The round limit is reached. Please choose how to close.");
+  if (o.marks[who]) fail("You already sent your choices for this round.");
+  const clean = {};
+  for (const item of o.items) {
+    if (!MARKS.includes(marks?.[item.id])) fail("Please mark every option.", 400);
+    clean[item.id] = marks[item.id];
+  }
+  o.marks[who] = clean;
+  log(s, who, `sent their sealed choices for round ${o.round}`);
+  if (!o.marks[other(who)]) return save(s);
+
+  // Both sealed choices are in: pick the option both can live with that they like most together.
+  const score = { prefer: 2, ok: 1 };
+  const both = o.items.filter((i) => o.marks.A[i.id] !== "no" && o.marks.B[i.id] !== "no");
+  const best = both.sort((x, y) => score[o.marks.A[y.id]] + score[o.marks.B[y.id]] - score[o.marks.A[x.id]] - score[o.marks.B[x.id]])[0];
+  s.quick.history.push({ round: o.round, options: o.items.map(({ id, title, terms }) => ({ id, title, terms })), marks: o.marks, match: best?.id || null, declinedBy: null });
+  if (best) {
+    s.state = "QUICK_CONFIRM";
+    s.quick.confirm = { optionId: best.id, A: null, B: null };
+    log(s, null, `both can accept "${best.title}"; waiting for final confirmation`);
+    return save(s);
+  }
+  log(s, null, `no option in round ${o.round} works for both`);
+  return nextRound(s);
+}
+
+// No match: go back to each side privately with gap-focused questions, or stop at the round limit.
+function nextRound(s) {
+  if (s.quick.round >= QUICK_MAX_ROUNDS) {
+    s.state = "QUICK_OPTIONS";
+    s.quick.options.exhausted = true;
+    s.quick.confirm = null;
+    log(s, null, `round limit (${QUICK_MAX_ROUNDS}) reached; please choose how to close`);
+    return save(s);
+  }
+  s.state = "QUICK_INTERVIEW";
+  s.quick.confirm = null;
+  for (const p of ["A", "B"]) {
+    const q = s.participants[p].quick;
+    q.phase = s.quick.round;
+    q.status = "interviewing";
+    q.questions = [];
+  }
+  runInterview(s, "A");
+  return runInterview(s, "B");
+}
+
+export function confirmQuick(s, who, { accept, note }) {
+  assertQuick(s, "QUICK_CONFIRM");
+  const c = s.quick.confirm;
+  if (c[who] !== null) fail("You already answered.");
+  c[who] = !!accept;
+  if (!accept) {
+    const q = s.participants[who].quick;
+    const why = (note || "").trim().slice(0, 2000);
+    // The reason is private: it only goes into the decliner's own gap interview.
+    q.transcript.push({ phase: s.quick.round, role: "me", text: `I declined "${s.quick.options.items.find((i) => i.id === c.optionId).title}" at the final confirmation${why ? `: ${why}` : "."}`, at: now() });
+    s.quick.history.at(-1).declinedBy = who;
+    log(s, who, "declined the matched option at the final confirmation");
+    return nextRound(s);
+  }
+  log(s, who, "confirmed the agreement");
+  if (c.A && c.B) {
+    s.quick.agreement = s.quick.options.items.find((i) => i.id === c.optionId);
+    return finish(s, "FULL_AGREEMENT", who);
+  }
+  return save(s);
+}
+
+export function setNotify(s, who, { topic }) {
+  const t = (topic || "").trim();
+  if (t && !notify.validTopic(t)) fail("Topic: 8-64 letters, digits, - or _.", 400);
+  s.participants[who].notify = t || null;
+  return save(s);
+}
+
+// Whether the participant has something to do now. Drives the UI's "your turn" signal and pings.
+export function yourTurn(s, who) {
+  const me = s.participants[who];
+  if (!me || TERMINAL.includes(s.state) || s.paused) return false;
+  if (s.outcome?.proposal && s.outcome.proposal.by !== who) return true;
+  if (s.mode !== "quick") return false;
+  const running = (k) => s.jobs[k]?.status === "running";
+  const q = me.quick;
+  switch (s.state) {
+    case "QUICK_FRAMING":
+      return !!(s.quick.framing && !s.quick.framing.acceptedBy[who] && !running("frame"));
+    case "QUICK_INTERVIEW":
+      if (running(`interview_${who}`)) return false;
+      return q.status === "draft" || q.status === "review" || (q.status === "interviewing" && q.questions.length > 0);
+    case "QUICK_OPTIONS":
+      return s.quick.options.exhausted || !s.quick.options.marks[who];
+    case "QUICK_CONFIRM":
+      return s.quick.confirm[who] === null;
+  }
+  return false;
+}
+
 // ---------- Pause, outcomes, deletion ----------
 
 export function pause(s, who, reason) {
   assertActive(s);
   s.paused = { by: who, at: now(), reason: (reason || "").slice(0, 500) };
   log(s, who, "paused the process");
-  return store.save(s);
+  return save(s);
 }
 
 export function resume(s, who) {
   if (!s.paused) fail("Not paused.");
   s.paused = null;
   log(s, who, "resumed the process");
-  return store.save(s);
+  return save(s);
 }
 
 // No agreement can be declared unilaterally at any time (each side may always walk away).
@@ -480,10 +783,12 @@ export function proposeOutcome(s, who, { type, note }) {
   if (type === "PARTIAL_AGREEMENT" && !(s.draft && current(s).clauses.some((c) => c.status === "agreed"))) {
     fail("A partial agreement needs at least one clause both have agreed to.", 400);
   }
-  if (type === "CLARIFIED_DISAGREEMENT" && !s.map) fail("Clarified disagreement requires a shared problem map first.", 400);
+  if (type === "CLARIFIED_DISAGREEMENT" && !s.map && !(s.quick?.round > 0)) {
+    fail("Clarified disagreement requires a shared problem map (or a round of options) first.", 400);
+  }
   s.outcome = { proposal: { type, by: who, at: now(), note: (note || "").slice(0, 2000) } };
   log(s, who, `proposed to close as ${type}`);
-  return store.save(s);
+  return save(s);
 }
 
 export function respondOutcome(s, who, { accept }) {
@@ -492,12 +797,12 @@ export function respondOutcome(s, who, { accept }) {
   if (prop.by === who) {
     s.outcome.proposal = null;
     log(s, who, "withdrew their closing proposal");
-    return store.save(s);
+    return save(s);
   }
   if (!accept) {
     s.outcome.proposal = null;
     log(s, who, `declined to close as ${prop.type}`);
-    return store.save(s);
+    return save(s);
   }
   return finish(s, prop.type, who, prop.note);
 }
@@ -507,10 +812,34 @@ function finish(s, type, who, note) {
   s.paused = null;
   s.outcome = { ...(s.outcome || {}), proposal: null, final: { type, at: now(), by: who, note: note || "" } };
   log(s, who, `closed the process: ${type}`);
-  return store.save(s);
+  return save(s);
 }
 
 // ---------- View (privacy filter) ----------
+
+function quickView(s, who) {
+  const q = s.quick;
+  const o = q.options;
+  const theirs = o?.marks[other(who)];
+  return {
+    framing: q.framing,
+    round: q.round,
+    maxRounds: QUICK_MAX_ROUNDS,
+    // Choices are sealed: you see the other side's marks only once both have sent theirs.
+    options: o && {
+      round: o.round,
+      items: o.items,
+      exhausted: o.exhausted,
+      yourMarks: o.marks[who],
+      theyMarked: !!theirs,
+      theirMarks: o.marks[who] && theirs ? theirs : null,
+    },
+    history: q.history.map(({ declinedBy, ...r }) => ({ ...r, declined: !!declinedBy })),
+    // Like votes, the other side's confirmation shows only after you answered, to avoid pressure.
+    confirm: q.confirm && { optionId: q.confirm.optionId, you: q.confirm[who], them: q.confirm[who] === null ? null : q.confirm[other(who)] },
+    agreement: q.agreement,
+  };
+}
 
 export function view(s, who) {
   const me = s.participants[who];
@@ -525,8 +854,10 @@ export function view(s, who) {
     id: s.id,
     version: s.version,
     title: s.title,
+    mode: s.mode || "full",
     state: s.state,
     paused: s.paused,
+    yourTurn: yourTurn(s, who),
     you: who,
     joinCode: who === "A" ? s.joinCode : null,
     names: { A: s.participants.A.name, B: s.participants.B?.name || null },
@@ -539,9 +870,12 @@ export function view(s, who) {
       clarifyingQuestions: me.clarifyingQuestions,
       safety: me.safety,
       batnaCheck: me.batnaCheck,
+      notify: me.notify,
+      quick: me.quick,
     },
-    // Only progress of the other participant, never their intake or statements.
-    them: them ? { name: them.name, intakeStatus: them.intakeStatus } : null,
+    // Only progress of the other participant, never their intake, statements, answers or brief.
+    them: them ? { name: them.name, intakeStatus: them.intakeStatus, quickStatus: them.quick?.status || null } : null,
+    quick: s.quick && quickView(s, who),
     map: s.map && {
       problemStatement: s.map.problemStatement,
       done: s.map.done,

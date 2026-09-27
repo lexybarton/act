@@ -411,3 +411,157 @@ Help ${name} compare the current draft with their own best alternative if no agr
     effort: "medium",
   });
 }
+
+// ---------- Quick mode: one agreed question, private AI interviews, sealed choice ----------
+
+const QUICK_RULES = `Quick mode: the two participants are settling ONE specific, agreed question, often because direct communication between them is blocked or hostile. Speed matters: the aim is a workable answer within minutes to hours, not a resolution of their whole relationship or conflict.
+- Stay strictly within the agreed question. If someone raises the wider conflict, acknowledge it briefly and set it aside; never carry it into anything the other person sees.
+- Be concrete: who does what, when, where, how much, and what happens if it goes wrong.`;
+
+const QUICK_PRIVACY = `Privacy: each side's brief is PARAPHRASE-level. It may inform your output, but must never be quoted or closely reproduced. Each participant's fallback (what they do without agreement) is private and has been removed.`;
+
+const FrameSchema = z.object({ question: z.string(), note: z.string() });
+
+export async function quickFrame({ question, name }) {
+  if (MOCK) return { question: /\?\s*$/.test(question) ? question.trim() : `${question.trim().replace(/[.!]+$/, "")}?`, note: "" };
+  return call({
+    system: `${PRINCIPLES}\n\n${QUICK_RULES}`,
+    prompt: `${name} wants to settle one issue with another person and wrote this about it:
+"""
+${question}
+"""
+
+Rewrite it as ONE neutral, concrete question that both people could agree is the thing to settle. It must not presuppose anyone's position, blame anyone, or carry loaded wording. Keep dates, places and amounts that define the issue. If the text bundles several issues or the whole conflict, narrow it to the single most concrete, time-sensitive issue in it.
+
+note: one short sentence addressed to ${name} if you narrowed or substantially reworded it (say what you left out and that it can be a separate question); otherwise "".`,
+    schema: FrameSchema,
+    effort: "medium",
+  });
+}
+
+const BriefSchema = z.object({
+  position: z.string(),
+  needs: z.string(),
+  limits: z.string(),
+  flexibility: z.string(),
+  facts: z.array(z.string()),
+  open_points: z.array(z.string()),
+});
+const InterviewSchema = z.object({
+  ready: z.boolean(),
+  questions: z.array(z.string()),
+  brief: BriefSchema,
+  note: z.string(),
+  safety: z.object({ concern: z.boolean(), note: z.string() }),
+});
+
+const fmtBrief = (name, b) =>
+  b
+    ? `Position: ${b.position}\nNeeds: ${b.needs}\nLimits: ${b.limits}\nFlexibility: ${b.flexibility}\nFacts: ${b.facts.join("; ") || "-"}\nOpen points: ${b.open_points.join("; ") || "-"}`
+    : `(${name} has not been interviewed yet)`;
+
+// Private interview of one participant. The AI decides what it still needs to know and asks for it.
+export async function quickInterview({ question, deadline, name, otherName, intake, transcript, gap, otherBrief, forceReady }) {
+  if (MOCK) return mockInterview(intake, transcript, forceReady);
+  const talk = transcript.length
+    ? transcript
+        .map((t) => (t.role === "ai" ? `YOU ASKED:\n${t.questions.map((q) => `- ${q}`).join("\n")}` : `${name.toUpperCase()} ANSWERED:\n${t.text}`))
+        .join("\n\n")
+    : "(nothing asked yet in this phase)";
+  const gapText = gap
+    ? `
+Where things stand: the previous round of options did not settle it.
+${gap.options.map((o) => `- ${o.title}: ${o.terms.join(" / ")} (${name} marked it: ${gap.ownMarks?.[o.id] || "-"})`).join("\n")}
+${gap.declined ? `An option both had marked acceptable was declined at the final confirmation by ${gap.declinedByMe ? name : otherName}.` : "No option was acceptable to both."}
+In this phase, find what would bridge the gap: ask about the specific terms that blocked ${name}, what variation they could accept, and what they would need in exchange.
+`
+    : "";
+  const other = otherBrief
+    ? `
+What is known about ${otherName}'s side (PARAPHRASE-level). You may use it to test whether an arrangement that would also work for ${otherName} is acceptable to ${name}, but never quote it, attribute specifics to ${otherName}, or reveal more than a neutral proposal would:
+${fmtBrief(otherName, otherBrief)}
+`
+    : "";
+  return call({
+    system: `${PRINCIPLES}\n\n${QUICK_RULES}\n\nYou are privately interviewing ONE participant, ${name}. Only ${name} sees your questions and brief. The brief will later inform options both people see, in paraphrased form only.`,
+    prompt: `Agreed question: "${question}"${deadline ? `\nIt must be settled by: ${deadline}` : ""}
+
+${name}'s first answers:
+- What I need from this: ${intake.need || "(blank)"}
+- What I propose: ${intake.proposal || "(blank)"}
+- What I cannot accept: ${intake.limits || "(blank)"}
+- My fallback if we don't settle it (PRIVATE: never put it in the brief; use it only to understand how much room ${name} has): ${intake.fallback || "(blank)"}
+${gapText}${other}
+Interview so far in this phase:
+${talk}
+
+Hunt for the information needed to generate options that could actually work. Ask only questions whose answers could change the options: concrete times, amounts, places, logistics; what exactly is unacceptable and why; what ${name} could offer or trade; hard constraints; what "good enough" looks like; how a contested fact could be checked instead of argued. One thing per question, answerable in a sentence or two, plain language, addressed to ${name} as "you". Don't ask about feelings or history unless it matters for this question. Don't repeat questions already answered.
+
+ready: true if you could now generate workable options, or if more questions would not change them${forceReady ? " (you MUST set ready=true now and ask nothing)" : ""}. If ready, questions=[]. Otherwise 1 to 3 questions.
+brief: your current understanding of ${name}'s side of THIS question, in third person, concise and neutral. Exclude the fallback and anything off the agreed question.
+note: if ${name} raised things outside the agreed question, one short sentence acknowledging it and saying it is set aside for now; otherwise "".
+safety: concern=true only if there are signs of violence, threats, coercion, stalking, abuse, or risk of self-harm; then gently note that professional or emergency help may be more appropriate. Otherwise concern=false, note="".`,
+    schema: InterviewSchema,
+    effort: "medium",
+  });
+}
+
+function mockInterview(intake, transcript, forceReady) {
+  const answered = transcript.some((t) => t.role === "me");
+  const brief = { position: intake.proposal, needs: intake.need, limits: intake.limits, flexibility: "", facts: [], open_points: [] };
+  const safety = { concern: false, note: "" };
+  if (answered || forceReady) return { ready: true, questions: [], brief, note: "", safety };
+  return { ready: false, questions: ["[mock] What exact time would work for you?"], brief, note: "", safety };
+}
+
+const QuickOptionsSchema = z.object({
+  options: z.array(
+    z.object({
+      title: z.string(),
+      terms: z.array(z.string()),
+      rationale: z.string(),
+      serves_a: z.string(),
+      serves_b: z.string(),
+    }),
+  ),
+});
+
+export async function quickOptions({ question, deadline, names, briefA, briefB, history }) {
+  if (MOCK) return mockQuickOptions(names, briefA, briefB, history.length);
+  const past = history.length
+    ? history
+        .map(
+          (r) =>
+            `Round ${r.round}:\n${r.options.map((o) => `- ${o.title}: ${o.terms.join(" / ")} (${names.A}: ${r.marks.A[o.id]}, ${names.B}: ${r.marks.B[o.id]})`).join("\n")}${r.declined ? "\n  The option both marked acceptable was declined at the final confirmation." : ""}`,
+        )
+        .join("\n")
+    : "(first round)";
+  return call({
+    system: `${PRINCIPLES}\n\n${QUICK_RULES}\n\n${QUICK_PRIVACY}\n\nBoth participants will see every option and privately mark each one prefer / ok / no. Do not rank them.`,
+    prompt: `Agreed question: "${question}"${deadline ? `\nMust be settled by: ${deadline}` : ""}
+
+${names.A}'s side:
+${fmtBrief(names.A, briefA)}
+
+${names.B}'s side:
+${fmtBrief(names.B, briefB)}
+
+Earlier rounds (prefer / ok / no):
+${past}
+
+Write 2 to 4 concrete, immediately executable answers to the agreed question. Each option: a short title; terms (who does what, when, where, how much; what happens if something goes wrong, where relevant); rationale (one sentence on its fairness basis: an objective standard, a trade, a condition, a time-limited trial, or verification instead of arguing about a contested fact); how it serves ${names.A} (serves_a) and ${names.B} (serves_b).
+Respect both sides' stated limits. At least one option must differ from both stated proposals. If there were earlier rounds, do not repeat options that got a "no"; use what the follow-up interviews revealed to bridge the gap.`,
+    schema: QuickOptionsSchema,
+  });
+}
+
+function mockQuickOptions(names, a, b, round) {
+  const r = `[mock r${round + 1}]`;
+  return {
+    options: [
+      { title: `${names.A}'s proposal ${r}`, terms: [a?.position || "-"], rationale: "Stated proposal.", serves_a: "Meets their proposal.", serves_b: "Unclear." },
+      { title: `${names.B}'s proposal ${r}`, terms: [b?.position || "-"], rationale: "Stated proposal.", serves_a: "Unclear.", serves_b: "Meets their proposal." },
+      { title: `Middle ground ${r}`, terms: ["Split the difference."], rationale: "Reciprocal concession.", serves_a: "Partly.", serves_b: "Partly." },
+    ],
+  };
+}

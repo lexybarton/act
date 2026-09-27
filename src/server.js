@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as store from "./store.js";
 import * as flow from "./flow.js";
+import * as notify from "./notify.js";
 import { MOCK } from "./llm.js";
 
 const app = express();
@@ -31,7 +32,11 @@ app.post(
   "/api/sessions",
   wrap((req) => {
     if (!req.body.consent) throw new flow.HttpError(400, "Please accept the ground rules.");
-    const s = flow.createSession({ title: text(req.body.title, 200, "Topic"), name: text(req.body.name, 60, "Name") });
+    const name = text(req.body.name, 60, "Name");
+    const s =
+      req.body.mode === "quick"
+        ? flow.createSession({ mode: "quick", name, question: text(req.body.question, 2000, "The issue"), deadline: req.body.deadline })
+        : flow.createSession({ title: text(req.body.title, 200, "Topic"), name });
     return { id: s.id, token: s.participants.A.token };
   }),
 );
@@ -48,7 +53,7 @@ app.post(
 // Every per-session route authenticates by the participant's secret token.
 const routes = {
   "GET /": (s, who) => s,
-  "DELETE /": (s) => (store.remove(s.id), null),
+  "DELETE /": (s) => (store.remove(s.id), notify.forget(s.id), null),
   "PUT /intake": (s, who, b) => flow.saveIntake(s, who, b),
   "POST /intake/submit": (s, who) => flow.submitIntake(s, who),
   "POST /intake/reopen": (s, who) => flow.reopenIntake(s, who),
@@ -67,6 +72,17 @@ const routes = {
   "POST /resume": (s, who) => flow.resume(s, who),
   "POST /outcome/propose": (s, who, b) => flow.proposeOutcome(s, who, b),
   "POST /outcome/respond": (s, who, b) => flow.respondOutcome(s, who, b),
+  "PUT /notify": (s, who, b) => flow.setNotify(s, who, b),
+  // Quick mode
+  "POST /quick/frame": (s, who, b) => flow.proposeFraming(s, who, b),
+  "POST /quick/frame/accept": (s, who) => flow.acceptFraming(s, who),
+  "PUT /quick/intake": (s, who, b) => flow.saveQuickIntake(s, who, b),
+  "POST /quick/start": (s, who) => flow.startInterview(s, who),
+  "POST /quick/answer": (s, who, b) => flow.answerQuick(s, who, b),
+  "POST /quick/ready": (s, who) => flow.confirmBrief(s, who),
+  "POST /quick/options": (s, who) => flow.generateQuickOptions(s, who),
+  "POST /quick/mark": (s, who, b) => flow.markQuick(s, who, b),
+  "POST /quick/confirm": (s, who, b) => flow.confirmQuick(s, who, b),
 };
 
 for (const [key, handler] of Object.entries(routes)) {
