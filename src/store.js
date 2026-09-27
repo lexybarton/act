@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const DATA_DIR = path.resolve(ROOT, process.env.DATA_DIR || "data");
-const RETENTION_DAYS = Number(process.env.RETENTION_DAYS || 30);
+export const RETENTION_DAYS = Number(process.env.RETENTION_DAYS || 30);
 fs.mkdirSync(DATA_DIR, { recursive: true });
 
 const sessions = new Map();

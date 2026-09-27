@@ -26,13 +26,21 @@ const text = (v, max, label) => {
   return t.slice(0, max);
 };
 
-app.get("/api/config", (req, res) => res.json({ mock: MOCK }));
+// QUICK_ONLY hides the full process; OPERATOR names who runs this server (shown in the ground rules,
+// because whoever runs the server can read everything stored on it).
+const QUICK_ONLY = process.env.QUICK_ONLY === "1";
+const OPERATOR = (process.env.OPERATOR || "").trim().slice(0, 100) || null;
+
+app.get("/api/config", (req, res) =>
+  res.json({ mock: MOCK, quickOnly: QUICK_ONLY, operator: OPERATOR, retentionDays: store.RETENTION_DAYS }),
+);
 
 app.post(
   "/api/sessions",
   wrap((req) => {
     if (!req.body.consent) throw new flow.HttpError(400, "Please accept the ground rules.");
     const name = text(req.body.name, 60, "Name");
+    if (QUICK_ONLY && req.body.mode !== "quick") throw new flow.HttpError(400, "Only quick sessions are available on this server.");
     const s =
       req.body.mode === "quick"
         ? flow.createSession({ mode: "quick", name, question: text(req.body.question, 2000, "The issue"), deadline: req.body.deadline })

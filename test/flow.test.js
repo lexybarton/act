@@ -285,3 +285,11 @@ test("quick mode: round limit, then clarified disagreement by consent", async ()
   v = await ok("POST", `/api/s/${id}/outcome/respond`, { accept: true }, b.token);
   assert.equal(v.state, "CLARIFIED_DISAGREEMENT");
 });
+
+test("config exposes quick-only flag, operator and retention for the ground rules", async () => {
+  const c = await ok("GET", "/api/config");
+  assert.equal(c.mock, true);
+  assert.equal(c.quickOnly, false);
+  assert.equal(c.operator, null);
+  assert.equal(typeof c.retentionDays, "number");
+});

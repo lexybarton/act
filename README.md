@@ -70,6 +70,8 @@ Each person can set this up under **"Get told when it's your turn"** at the bott
 | `RETENTION_DAYS` | `30` | Inactive sessions are deleted after this. |
 | `MAX_ROUNDS` | `8` | Full mode: drafting round limit. |
 | `QUICK_MAX_ROUNDS` | `3` | Quick mode: option rounds before closing is suggested. |
+| `QUICK_ONLY` | off | Set to `1` to offer only quick mode (the full process is hidden and refused). |
+| `OPERATOR` | none | Who runs this server. Shown in the ground rules, because whoever runs the server can read everything stored on it. |
 | `NTFY_URL` | `https://ntfy.sh` | ntfy server for "your turn" pings. |
 | `PUBLIC_URL` | none | Public address of this app, used as the link in pings. |
 
@@ -142,5 +144,5 @@ Privacy in quick mode: the other person never sees your answers, your summary, y
 - Quick-mode prompts are untuned, like the rest. The mock only exercises the flow, not the quality of Claude's questions or options.
 - Single-process storage in JSON files. Fine for a pilot; use a database for more than one server instance.
 - Evidence is text only (no file uploads).
-- Session data is stored unencrypted on the server. Anyone with server access can read it, so run it on infrastructure you trust.
+- Session data is stored unencrypted on the server. Anyone with server access can read it, including private answers. If one of the two participants runs the server, they can read the other's private material; the ground rules say so, and name the operator when `OPERATOR` is set. Ideally a neutral person runs it.
 - Prompt quality is untuned. Build a small eval set from real (consented) sessions before relying on it.

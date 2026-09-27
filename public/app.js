@@ -139,6 +139,12 @@ const vals = {};
 const val = (k, fallback = "") => (k in vals ? vals[k] : fallback);
 const clearVals = (prefix) => Object.keys(vals).forEach((k) => k.startsWith(prefix) && delete vals[k]);
 
+// Server settings: quick-only mode, who runs the server, retention.
+const config = await fetch("/api/config")
+  .then((r) => r.json())
+  .catch(() => ({}));
+if (config.quickOnly) quickMode = true;
+
 // ---------- routing ----------
 
 window.addEventListener("hashchange", route);
@@ -227,28 +233,43 @@ function renderHome(message, joinCode = "") {
   updateTitle();
   $app.innerHTML = `
     <h1>Act</h1>
-    <p class="muted">A structured, two-sided way to work through a decision or disagreement. Not a judge. Not a therapist.
-    Each person speaks privately first; the AI helps you build one shared picture of the problem and, if possible, one text you can both accept.</p>
+    ${
+      quickMode
+        ? `<p class="muted">A way to settle one specific issue when talking directly isn't working. Not a judge. Not a therapist.
+          Claude talks with each of you privately, proposes concrete answers, and each of you chooses in private.</p>`
+        : `<p class="muted">A structured, two-sided way to work through a decision or disagreement. Not a judge. Not a therapist.
+          Each person speaks privately first; the AI helps you build one shared picture of the problem and, if possible, one text you can both accept.</p>`
+    }
     ${message ? `<div class="banner warn">${h(message)}</div>` : ""}
     <div class="card soft">
       <h3>Ground rules</h3>
       <ul class="tight small">
-        <li>Your intake is private. The other person only sees what you mark as shareable, and only after you have approved it.</li>
-        <li>The AI proposes; it never decides. Nothing counts as shared or agreed until you both explicitly accept it.</li>
-        <li>Claims stay claims: disputed facts are recorded as each person's account, not as truth.</li>
-        <li>Full agreement, partial agreement, clarified disagreement and no agreement are all legitimate outcomes. Either of you can pause or walk away at any time.</li>
+        ${
+          quickMode
+            ? `<li>What you tell Claude stays between you and Claude. The other person never sees your answers, Claude's summary of your side, your fallback, or your own wording of the question. They only see the neutral question and the options Claude proposes to both of you.</li>
+              <li>Claude proposes; it never decides. Nothing is agreed until you both confirm the same option.</li>`
+            : `<li>Your intake is private. The other person only sees what you mark as shareable, and only after you have approved it.</li>
+              <li>The AI proposes; it never decides. Nothing counts as shared or agreed until you both explicitly accept it.</li>
+              <li>Claims stay claims: disputed facts are recorded as each person's account, not as truth.</li>`
+        }
+        <li>${quickMode ? "An agreement, a clarified disagreement and no agreement are all legitimate outcomes." : "Full agreement, partial agreement, clarified disagreement and no agreement are all legitimate outcomes."} Either of you can pause or walk away at any time.</li>
         <li>This is not suitable for situations involving violence, threats, or coercion. Please seek professional help there.</li>
-        <li>Content is processed by an AI model (Anthropic Claude) and stored on this server until either of you deletes the session, or after 30 days of inactivity.</li>
+        <li>Content is processed by an AI model (Anthropic Claude) and stored on this server until either of you deletes the session, or after ${h(String(config.retentionDays || 30))} days of inactivity.</li>
+        <li><b>Who can see the stored data:</b> this server is run by ${config.operator ? `<b>${h(config.operator)}</b>` : "whoever set it up"}. Like on any website, whoever runs the server can technically read everything stored here, including private answers. The app keeps things private between the two of you, but it cannot protect you from the person running it. Only continue if you trust them with that, or ask for it to be run by someone neutral.</li>
       </ul>
       <label class="row" style="font-weight:400"><input type="checkbox" data-k="consent" ${val("consent") ? "checked" : ""}> I understand and accept these ground rules.</label>
     </div>
     <div class="grid2">
       <div class="card">
         <h3>Start a new session</h3>
-        <div class="row">
+        ${
+          config.quickOnly
+            ? ""
+            : `<div class="row">
           <button class="chip ${quickMode ? "on" : ""}" data-action="mode" data-mode="quick">Quick: settle one issue</button>
           <button class="chip ${quickMode ? "" : "on"}" data-action="mode" data-mode="full">Full process</button>
-        </div>
+        </div>`
+        }
         ${
           quickMode
             ? `<p class="small muted">For one specific thing that has to be settled soon (minutes to hours), when talking directly isn't working.
@@ -1022,7 +1043,7 @@ $app.addEventListener("click", async (e) => {
   const s = session;
   switch (a) {
     case "mode":
-      quickMode = d.mode === "quick";
+      quickMode = config.quickOnly || d.mode === "quick";
       renderHome(...homeArgs);
       return;
     case "browserNotify":
