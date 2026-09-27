@@ -435,15 +435,15 @@ function renderStatements(me) {
         .map(
           (st, i) => `
         <div class="statement">
-          <textarea data-k="st.${i}.text" data-st="${i}" data-field="text" rows="2">${h(st.text)}</textarea>
+          <textarea aria-label="Statement ${i + 1} text" data-k="st.${i}.text" data-st="${i}" data-field="text" rows="2">${h(st.text)}</textarea>
           <div class="controls">
-            <select data-k="st.${i}.category" data-st="${i}" data-field="category">${Object.entries(CATEGORIES)
+            <select aria-label="Statement ${i + 1} category" data-k="st.${i}.category" data-st="${i}" data-field="category">${Object.entries(CATEGORIES)
               .map(([k, l]) => `<option value="${k}" ${st.category === k ? "selected" : ""}>${l}</option>`)
               .join("")}</select>
-            <select data-k="st.${i}.sharing" data-st="${i}" data-field="sharing">${Object.entries(SHARING)
+            <select aria-label="Statement ${i + 1} sharing" data-k="st.${i}.sharing" data-st="${i}" data-field="sharing">${Object.entries(SHARING)
               .map(([k, l]) => `<option value="${k}" ${st.sharing === k ? "selected" : ""}>${l}</option>`)
               .join("")}</select>
-            <button class="danger" data-action="delStatement" data-i="${i}" title="Remove">✕</button>
+            <button aria-label="Remove statement ${i + 1}" class="danger" data-action="delStatement" data-i="${i}" title="Remove">✕</button>
           </div>
         </div>`,
         )
